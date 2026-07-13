@@ -1,0 +1,724 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: arcturus-setup <init|host|all> [options]
+
+Project options:
+  --project-dir DIR            Target repository (default: current directory)
+  --config FILE                Non-secret dotenv-style configuration
+  --service NAME               Lowercase service name
+  --component NAME             Component name (default: app)
+  --project-spec FILE          Declarative multi-component project graph JSON
+  --type web|worker|scheduled|oneshot
+  --image-repository REPO      Registry repository without tag
+  --containerfile PATH         Repository-relative Containerfile/Dockerfile
+  --validation-target TARGETS Comma-separated test stages (default: test)
+  --release-target TARGET      Production stage (default: runtime; '-' for final)
+  --exposure public|internal|host
+  --port PORT                  Container port for web services
+  --domain DOMAIN              Public hostname
+  --tls portal|external|none   TLS owner (default: portal for public web)
+  --health-path PATH           HTTP health endpoint
+  --health-command COMMAND     Podman health command
+  --systemd-health             Readiness is systemd active state
+  --public-verification MODE  http-success|cloudflare-challenge|skip
+  --schedule CALENDAR          systemd OnCalendar value
+  --restart always|on-failure|no
+  --network NAME               Podman network (default: internal_routing)
+  --base-domain DOMAIN        Enable router integration for this base domain
+  --cert-domain DOMAIN        Portal certificate domain
+  --vhosts-dir DIR            Portal generated-vhost directory
+  --nginx-container NAME      Portal nginx container
+  --deploy-url URL             Arcturus deployment API URL
+  --ci gitea|github|generic|none
+  --test-command COMMAND       Command that must pass before publishing
+  --allow-no-tests             Permit an explicit no-op test adapter
+  --local-compose              Create local-development compose.yaml if absent
+
+Common/host options:
+  --bundle IMAGE@DIGEST        Pinned Arcturus control-plane/CLI bundle
+  --arcturus-source DIR        Local Arcturus repository for development
+  --host-user USER             Rootless service account (default: current user)
+  --listen-address ADDRESS     Private host API listener
+  --runner-cidr CIDR           Trusted CI source CIDR
+  --configure-firewall        Add a source-scoped port 9090 firewalld rule
+  --allowed-bind-root DIR      Repeatable host bind allowlist
+  --non-interactive            Never prompt; report all missing values
+  --dry-run                    Validate and show intended actions
+  --force                      Replace modified generated files after backup
+EOF
+}
+
+MODE="${1:-}"
+[[ "$MODE" =~ ^(init|host|all)$ ]] || { usage >&2; exit 2; }
+shift
+BLUEPRINT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+PROJECT_DIR="${ARCTURUS_PROJECT_DIR:-$PWD}"
+CONFIG_FILE="${ARCTURUS_CONFIG_FILE:-}"
+SERVICE="${ARCTURUS_SERVICE:-}"
+COMPONENT="${ARCTURUS_COMPONENT:-app}"
+PROJECT_SPEC="${ARCTURUS_PROJECT_SPEC:-}"
+SERVICE_TYPE="${ARCTURUS_SERVICE_TYPE:-web}"
+IMAGE_REPOSITORY="${ARCTURUS_IMAGE_REPOSITORY:-}"
+CONTAINERFILE="${ARCTURUS_CONTAINERFILE:-}"
+VALIDATION_TARGETS="${ARCTURUS_VALIDATION_TARGETS:-test}"
+RELEASE_TARGET="${ARCTURUS_RELEASE_TARGET:-runtime}"
+EXPOSURE="${ARCTURUS_EXPOSURE:-public}"
+PORT="${ARCTURUS_PORT:-8080}"
+DOMAIN="${ARCTURUS_DOMAIN:-}"
+TLS_MODE="${ARCTURUS_TLS_MODE:-}"
+HEALTH_PATH="${ARCTURUS_HEALTH_PATH:-/health}"
+HEALTH_COMMAND="${ARCTURUS_HEALTH_COMMAND:-}"
+HEALTH_KIND="${ARCTURUS_HEALTH_KIND:-auto}"
+PUBLIC_VERIFICATION="${ARCTURUS_PUBLIC_VERIFICATION:-}"
+SCHEDULE="${ARCTURUS_SCHEDULE:-}"
+RESTART="${ARCTURUS_RESTART:-}"
+NETWORK="${ARCTURUS_NETWORK:-internal_routing}"
+HOST_BASE_DOMAIN="${ARCTURUS_BASE_DOMAIN:-}"
+HOST_CERT_DOMAIN="${ARCTURUS_CERT_DOMAIN:-}"
+HOST_VHOSTS_DIR="${ARCTURUS_VHOSTS_DIR:-}"
+HOST_NGINX_CONTAINER="${ARCTURUS_NGINX_CONTAINER:-portal-nginx}"
+DEPLOY_URL="${ARCTURUS_DEPLOY_URL:-}"
+CI_PROVIDER="${ARCTURUS_CI:-gitea}"
+TEST_COMMAND="${ARCTURUS_TEST_COMMAND:-}"
+BUNDLE="${ARCTURUS_BUNDLE:-}"
+ARCTURUS_SOURCE="${ARCTURUS_SOURCE_DIR:-}"
+HOST_USER="${ARCTURUS_HOST_USER:-${USER:-$(id -un)}}"
+LISTEN_ADDRESS="${ARCTURUS_LISTEN_ADDRESS:-}"
+RUNNER_CIDR="${ARCTURUS_RUNNER_CIDR:-}"
+NON_INTERACTIVE=false
+DRY_RUN=false
+FORCE=false
+ALLOW_NO_TESTS=false
+LOCAL_COMPOSE=false
+CONFIGURE_FIREWALL=false
+ALLOWED_BIND_ROOTS=()
+declare -A CLI_SET=()
+declare -A CONFIG_SET=()
+
+while (($#)); do
+  case "$1" in
+    --project-dir) PROJECT_DIR="$2"; shift 2 ;;
+    --config) CONFIG_FILE="$2"; shift 2 ;;
+    --service) SERVICE="$2"; CLI_SET[service]=1; shift 2 ;;
+    --component) COMPONENT="$2"; CLI_SET[component]=1; shift 2 ;;
+    --project-spec) PROJECT_SPEC="$2"; CLI_SET[project_spec]=1; shift 2 ;;
+    --type) SERVICE_TYPE="$2"; CLI_SET[type]=1; shift 2 ;;
+    --image-repository) IMAGE_REPOSITORY="$2"; CLI_SET[image]=1; shift 2 ;;
+    --containerfile) CONTAINERFILE="$2"; shift 2 ;;
+    --validation-target) VALIDATION_TARGETS="$2"; shift 2 ;;
+    --release-target) RELEASE_TARGET="$2"; shift 2 ;;
+    --exposure) EXPOSURE="$2"; CLI_SET[exposure]=1; shift 2 ;;
+    --port) PORT="$2"; CLI_SET[port]=1; shift 2 ;;
+    --domain) DOMAIN="$2"; CLI_SET[domain]=1; shift 2 ;;
+    --tls) TLS_MODE="$2"; CLI_SET[tls]=1; shift 2 ;;
+    --health-path) HEALTH_PATH="$2"; HEALTH_KIND=http; CLI_SET[health]=1; shift 2 ;;
+    --health-command) HEALTH_COMMAND="$2"; HEALTH_KIND=command; CLI_SET[health]=1; shift 2 ;;
+    --systemd-health) HEALTH_KIND=systemd; CLI_SET[health]=1; shift ;;
+    --public-verification) PUBLIC_VERIFICATION="$2"; shift 2 ;;
+    --schedule) SCHEDULE="$2"; CLI_SET[schedule]=1; shift 2 ;;
+    --restart) RESTART="$2"; CLI_SET[restart]=1; shift 2 ;;
+    --network) NETWORK="$2"; CLI_SET[network]=1; shift 2 ;;
+    --base-domain) HOST_BASE_DOMAIN="$2"; shift 2 ;;
+    --cert-domain) HOST_CERT_DOMAIN="$2"; shift 2 ;;
+    --vhosts-dir) HOST_VHOSTS_DIR="$2"; shift 2 ;;
+    --nginx-container) HOST_NGINX_CONTAINER="$2"; shift 2 ;;
+    --deploy-url) DEPLOY_URL="$2"; CLI_SET[url]=1; shift 2 ;;
+    --ci) CI_PROVIDER="$2"; CLI_SET[ci]=1; shift 2 ;;
+    --test-command) TEST_COMMAND="$2"; CLI_SET[test]=1; shift 2 ;;
+    --allow-no-tests) ALLOW_NO_TESTS=true; shift ;;
+    --local-compose) LOCAL_COMPOSE=true; shift ;;
+    --bundle) BUNDLE="$2"; CLI_SET[bundle]=1; shift 2 ;;
+    --arcturus-source) ARCTURUS_SOURCE="$2"; shift 2 ;;
+    --host-user) HOST_USER="$2"; shift 2 ;;
+    --listen-address) LISTEN_ADDRESS="$2"; shift 2 ;;
+    --runner-cidr) RUNNER_CIDR="$2"; shift 2 ;;
+    --configure-firewall) CONFIGURE_FIREWALL=true; shift ;;
+    --allowed-bind-root) ALLOWED_BIND_ROOTS+=("$2"); shift 2 ;;
+    --non-interactive) NON_INTERACTIVE=true; shift ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    --force) FORCE=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+
+PROJECT_DIR="$(mkdir -p "$PROJECT_DIR" && cd "$PROJECT_DIR" && pwd)"
+CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/.arcturus/project.env}"
+
+read_config() {
+  local key value
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  while IFS='=' read -r key value; do
+    [[ -n "$key" && ! "$key" =~ ^[[:space:]]*# ]] || continue
+    case "$key" in
+      ARCTURUS_SERVICE) [[ -z "$SERVICE" ]] && SERVICE="$value" ;;
+      ARCTURUS_COMPONENT) [[ -z "${ARCTURUS_COMPONENT+x}" && -z "${CLI_SET[component]:-}" ]] && COMPONENT="$value" ;;
+      ARCTURUS_PROJECT_SPEC) [[ -z "${ARCTURUS_PROJECT_SPEC+x}" && -z "${CLI_SET[project_spec]:-}" ]] && PROJECT_SPEC="$value" ;;
+      ARCTURUS_SERVICE_TYPE) [[ -z "${ARCTURUS_SERVICE_TYPE+x}" && -z "${CLI_SET[type]:-}" ]] && SERVICE_TYPE="$value" ;;
+      ARCTURUS_IMAGE_REPOSITORY) [[ -z "$IMAGE_REPOSITORY" ]] && IMAGE_REPOSITORY="$value" ;;
+      ARCTURUS_CONTAINERFILE) [[ -z "$CONTAINERFILE" ]] && CONTAINERFILE="$value" ;;
+      ARCTURUS_VALIDATION_TARGETS) VALIDATION_TARGETS="$value" ;;
+      ARCTURUS_RELEASE_TARGET) RELEASE_TARGET="$value" ;;
+      ARCTURUS_EXPOSURE)
+        if [[ -z "${ARCTURUS_EXPOSURE+x}" && -z "${CLI_SET[exposure]:-}" ]]; then
+          EXPOSURE="$value"; CONFIG_SET[exposure]=1
+        fi
+        ;;
+      ARCTURUS_PORT) [[ -z "${ARCTURUS_PORT+x}" && -z "${CLI_SET[port]:-}" ]] && PORT="$value" ;;
+      ARCTURUS_DOMAIN) [[ -z "$DOMAIN" ]] && DOMAIN="$value" ;;
+      ARCTURUS_TLS_MODE) [[ -z "${ARCTURUS_TLS_MODE+x}" && -z "${CLI_SET[tls]:-}" ]] && TLS_MODE="$value" ;;
+      ARCTURUS_HEALTH_KIND) [[ -z "${ARCTURUS_HEALTH_KIND+x}" && -z "${CLI_SET[health]:-}" ]] && HEALTH_KIND="$value" ;;
+      ARCTURUS_HEALTH_PATH) [[ -z "${ARCTURUS_HEALTH_PATH+x}" && -z "${CLI_SET[health]:-}" ]] && HEALTH_PATH="$value" ;;
+      ARCTURUS_HEALTH_COMMAND) [[ -z "${ARCTURUS_HEALTH_COMMAND+x}" && -z "${CLI_SET[health]:-}" ]] && HEALTH_COMMAND="$value" ;;
+      ARCTURUS_PUBLIC_VERIFICATION) [[ -z "$PUBLIC_VERIFICATION" ]] && PUBLIC_VERIFICATION="$value" ;;
+      ARCTURUS_SCHEDULE) [[ -z "${ARCTURUS_SCHEDULE+x}" && -z "${CLI_SET[schedule]:-}" ]] && SCHEDULE="$value" ;;
+      ARCTURUS_RESTART) [[ -z "${ARCTURUS_RESTART+x}" && -z "${CLI_SET[restart]:-}" ]] && RESTART="$value" ;;
+      ARCTURUS_NETWORK) [[ -z "${ARCTURUS_NETWORK+x}" && -z "${CLI_SET[network]:-}" ]] && NETWORK="$value" ;;
+      ARCTURUS_BASE_DOMAIN) [[ -z "$HOST_BASE_DOMAIN" ]] && HOST_BASE_DOMAIN="$value" ;;
+      ARCTURUS_CERT_DOMAIN) [[ -z "$HOST_CERT_DOMAIN" ]] && HOST_CERT_DOMAIN="$value" ;;
+      ARCTURUS_VHOSTS_DIR) [[ -z "$HOST_VHOSTS_DIR" ]] && HOST_VHOSTS_DIR="$value" ;;
+      ARCTURUS_NGINX_CONTAINER) HOST_NGINX_CONTAINER="$value" ;;
+      ARCTURUS_DEPLOY_URL) [[ -z "${ARCTURUS_DEPLOY_URL+x}" && -z "${CLI_SET[url]:-}" ]] && DEPLOY_URL="$value" ;;
+      ARCTURUS_CI) [[ -z "${ARCTURUS_CI+x}" && -z "${CLI_SET[ci]:-}" ]] && CI_PROVIDER="$value" ;;
+      ARCTURUS_TEST_COMMAND) [[ -z "${ARCTURUS_TEST_COMMAND+x}" && -z "${CLI_SET[test]:-}" ]] && TEST_COMMAND="$value" ;;
+      ARCTURUS_BUNDLE) [[ -z "$BUNDLE" ]] && BUNDLE="$value" ;;
+      *) echo "Ignoring unsupported configuration key: $key" >&2 ;;
+    esac
+    true
+  done <"$CONFIG_FILE"
+}
+read_config
+
+if [[ "$SERVICE_TYPE" != web && -z "${ARCTURUS_EXPOSURE+x}" \
+      && -z "${CLI_SET[exposure]:-}" && -z "${CONFIG_SET[exposure]:-}" ]]; then
+  EXPOSURE=internal
+fi
+if [[ -z "$DEPLOY_URL" && "$MODE" == all && -n "$LISTEN_ADDRESS" ]]; then
+  DEPLOY_URL="http://$LISTEN_ADDRESS:9090"
+fi
+if [[ -z "$DEPLOY_URL" && "$CI_PROVIDER" =~ ^(generic|none)$ ]]; then
+  DEPLOY_URL="http://127.0.0.1:9090"
+fi
+
+if [[ -z "$SERVICE" ]]; then
+  SERVICE="$(basename "$PROJECT_DIR" | tr '[:upper:]_' '[:lower:]-')"
+fi
+if [[ -z "$IMAGE_REPOSITORY" ]] && git -C "$PROJECT_DIR" remote get-url origin >/dev/null 2>&1; then
+  remote="$(git -C "$PROJECT_DIR" remote get-url origin)"
+  remote="${remote#*://}"
+  remote="${remote#*@}"
+  remote="${remote/:/\/}"
+  IMAGE_REPOSITORY="${remote%.git}"
+fi
+if [[ -z "$CONTAINERFILE" ]]; then
+  if [[ -f "$PROJECT_DIR/Containerfile" ]]; then CONTAINERFILE=Containerfile
+  elif [[ -f "$PROJECT_DIR/Dockerfile" ]]; then CONTAINERFILE=Dockerfile
+  else CONTAINERFILE=Containerfile
+  fi
+fi
+[[ -n "$TLS_MODE" ]] || { [[ "$EXPOSURE" == public ]] && TLS_MODE=portal || TLS_MODE=none; }
+if [[ -z "$RESTART" ]]; then
+  [[ "$SERVICE_TYPE" == web ]] && RESTART=always || RESTART=on-failure
+  [[ "$SERVICE_TYPE" =~ ^(scheduled|oneshot)$ ]] && RESTART=no
+fi
+if [[ -z "$TEST_COMMAND" ]]; then
+  if [[ -f "$PROJECT_DIR/package-lock.json" ]]; then TEST_COMMAND='npm ci && npm test --if-present && npm run build --if-present'
+  elif [[ -f "$PROJECT_DIR/pnpm-lock.yaml" ]]; then TEST_COMMAND='corepack enable && pnpm install --frozen-lockfile && pnpm test --if-present && pnpm build --if-present'
+  elif [[ -f "$PROJECT_DIR/pyproject.toml" ]]; then TEST_COMMAND='python3 -m pytest'
+  elif [[ -f "$PROJECT_DIR/go.mod" ]]; then TEST_COMMAND='go test ./...'
+  elif [[ -f "$PROJECT_DIR/Cargo.toml" ]]; then TEST_COMMAND='cargo test --locked'
+  fi
+fi
+if [[ "$SERVICE_TYPE" == web && "$HEALTH_KIND" =~ ^(auto|http)$ ]]; then
+  if [[ -f "$PROJECT_DIR/package.json" || -f "$PROJECT_DIR/package-lock.json" || -f "$PROJECT_DIR/pnpm-lock.yaml" ]]; then
+    HEALTH_KIND=node
+    HEALTH_COMMAND="node -e \"fetch('http://127.0.0.1:$PORT$HEALTH_PATH').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""
+  elif [[ -f "$PROJECT_DIR/pyproject.toml" || -f "$PROJECT_DIR/requirements.txt" ]]; then
+    HEALTH_KIND=python
+    HEALTH_COMMAND="python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:$PORT$HEALTH_PATH', timeout=5)\""
+  fi
+fi
+if [[ -z "$PUBLIC_VERIFICATION" ]]; then
+  [[ "$EXPOSURE" == public ]] && PUBLIC_VERIFICATION=http-success || PUBLIC_VERIFICATION=skip
+fi
+
+if ! $NON_INTERACTIVE && [[ -t 0 && "$MODE" != host ]]; then
+  read -r -p "Service name [$SERVICE]: " answer; SERVICE="${answer:-$SERVICE}"
+  if [[ -z "$IMAGE_REPOSITORY" ]]; then read -r -p "Image repository: " IMAGE_REPOSITORY; fi
+  if [[ "$SERVICE_TYPE" == web && "$EXPOSURE" == public && -z "$DOMAIN" ]]; then
+    read -r -p "Public hostname: " DOMAIN
+  fi
+  if [[ -z "$DEPLOY_URL" ]]; then read -r -p "Deployment API URL: " DEPLOY_URL; fi
+  if [[ "$CI_PROVIDER" =~ ^(gitea|github)$ && -z "$BUNDLE" ]]; then
+    read -r -p "Digest-pinned Arcturus bundle: " BUNDLE
+  fi
+fi
+
+errors=()
+[[ "$NETWORK" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || errors+=("invalid network name")
+if [[ "$MODE" != host ]]; then
+  [[ "$SERVICE" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || errors+=("service must be a lowercase DNS-style name")
+  [[ "$COMPONENT" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || errors+=("component must be a lowercase DNS-style name")
+  [[ "$SERVICE_TYPE" =~ ^(web|worker|scheduled|oneshot)$ ]] || errors+=("type must be web, worker, scheduled, or oneshot")
+  [[ "$EXPOSURE" =~ ^(public|internal|host)$ ]] || errors+=("exposure must be public, internal, or host")
+  [[ "$TLS_MODE" =~ ^(portal|external|none)$ ]] || errors+=("tls mode must be portal, external, or none")
+  [[ "$RESTART" =~ ^(always|on-failure|no)$ ]] || errors+=("invalid restart policy")
+  [[ "$CI_PROVIDER" =~ ^(gitea|github|generic|none)$ ]] || errors+=("invalid CI provider")
+  [[ "$PUBLIC_VERIFICATION" =~ ^(http-success|cloudflare-challenge|skip)$ ]] || errors+=("invalid public verification mode")
+  [[ -n "$DEPLOY_URL" ]] || errors+=("deploy URL is required for Gitea/GitHub CI")
+  [[ -z "$DEPLOY_URL" || "$DEPLOY_URL" =~ ^https?://[^[:space:]]+$ ]] || errors+=("deploy URL must be an http(s) URL without whitespace")
+  if [[ "$CI_PROVIDER" =~ ^(gitea|github)$ && -z "$BUNDLE" ]]; then
+    errors+=("Gitea/GitHub CI requires a digest-pinned Arcturus bundle")
+  fi
+  [[ -n "$IMAGE_REPOSITORY" ]] || errors+=("image repository is required and could not be detected")
+  [[ "$IMAGE_REPOSITORY" =~ ^[a-z0-9][a-z0-9._-]*(:[0-9]+)?(/[a-z0-9._-]+)+$ ]] || errors+=("image repository must be fully qualified and contain no tag")
+  [[ "$CONTAINERFILE" != /* && ! "$CONTAINERFILE" =~ (^|/)\.\.(/|$) && "$CONTAINERFILE" != *$'\n'* ]] || errors+=("containerfile must be a safe repository-relative path")
+  [[ "$VALIDATION_TARGETS" =~ ^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$ ]] || errors+=("validation targets must be comma-separated stage names")
+  [[ "$RELEASE_TARGET" == - || "$RELEASE_TARGET" =~ ^[A-Za-z0-9_.-]+$ ]] || errors+=("release target must be a stage name or '-'")
+  if [[ "$SERVICE_TYPE" == web ]]; then
+    [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -ge 1 && "$PORT" -le 65535 ]] || errors+=("web port must be between 1 and 65535")
+    [[ "$HEALTH_KIND" != http || "$HEALTH_PATH" =~ ^/[^[:space:]]*$ ]] || errors+=("HTTP health path must begin with /")
+    [[ "$HEALTH_KIND" != auto && "$HEALTH_KIND" != http ]] || errors+=("web health probe runtime is ambiguous; use --health-command or --systemd-health")
+  fi
+  [[ "$EXPOSURE" != public || -n "$DOMAIN" ]] || errors+=("public exposure requires a domain")
+  [[ "$SERVICE_TYPE" != scheduled || -n "$SCHEDULE" ]] || errors+=("scheduled services require --schedule")
+  [[ -z "$PROJECT_SPEC" || -f "$PROJECT_SPEC" ]] || errors+=("project spec does not exist: $PROJECT_SPEC")
+fi
+if [[ -n "$BUNDLE" && ! "$BUNDLE" =~ @sha256:[0-9a-f]{64}$ ]]; then
+  errors+=("Arcturus bundle must be pinned as repository@sha256:digest")
+fi
+if ((${#errors[@]})); then
+  printf 'Arcturus setup validation failed:\n' >&2
+  printf '  - %s\n' "${errors[@]}" >&2
+  exit 2
+fi
+
+if [[ "$MODE" =~ ^(init|all)$ ]]; then
+  [[ -n "$TEST_COMMAND" ]] || TEST_COMMAND=true
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' EXIT
+  mkdir -p "$work/.arcturus" "$work/scripts" "$work/.gitea/workflows" "$work/.github/workflows"
+  install -m 0755 "$BLUEPRINT_ROOT/scripts/arcturus-guard" "$work/scripts/arcturus-guard"
+
+  cat >"$work/AGENTS.md" <<EOF
+# Arcturus deployment contract for automation and LLM agents
+
+Production service **$SERVICE** has one release owner: the Arcturus v2 deployer.
+Read project-owned \`.arcturus/project.json\` and sole manifest
+\`arcturus.release.json\` before changing builds, deployment, routing, or secrets.
+
+Run \`scripts/arcturus-guard\`, then \`scripts/arcturus-ci <full-commit>\`. CI uses
+isolated Buildah storage, builds declared validation targets before release targets,
+pushes full-commit tags, resolves digests, maps shared images once, renders every
+component as \`repository@sha256:digest\`, deploys through \`arcturusctl\`, and
+verifies active commit/images/health plus the matching router receipt.
+
+Every routed component joins \`internal_routing\`; route ports are container ports.
+Nginx is generated from the active manifest. Never create a manual portal vhost.
+Use \`scripts/arcturus-lifecycle\` for lifecycle operations and the manual acceptance
+workflow for the expected-502 rollback probe. CI never starts backups or reboots.
+
+Never use legacy \`/deploy\`, direct deployment curl, \`latest\`, Watchtower,
+production Compose, Terraform release resources, shared runner pruning, obsolete
+secret names, embedded Git credentials, or secret-like manifest environment values.
+If the runner lacks the application toolchain, tests belong in a declared
+Containerfile validation target. Preserve project-owned files; review generator
+proposals under \`.arcturus/updates/\`.
+EOF
+
+  SETUP_SERVICE_TYPE="$SERVICE_TYPE" SETUP_IMAGE="$IMAGE_REPOSITORY" \
+  SETUP_SERVICE="$SERVICE" SETUP_COMPONENT="$COMPONENT" SETUP_NETWORK="$NETWORK" \
+  SETUP_RESTART="$RESTART" SETUP_HEALTH_KIND="$HEALTH_KIND" \
+  SETUP_PORT="$PORT" SETUP_HEALTH_PATH="$HEALTH_PATH" \
+  SETUP_HEALTH_COMMAND="$HEALTH_COMMAND" SETUP_SCHEDULE="$SCHEDULE" \
+  SETUP_EXPOSURE="$EXPOSURE" SETUP_DOMAIN="$DOMAIN" SETUP_PROJECT_SPEC="$PROJECT_SPEC" \
+  python3 - "$work/arcturus.release.json" <<'PY'
+import json, os, sys
+spec_path = os.environ["SETUP_PROJECT_SPEC"]
+if spec_path:
+    with open(spec_path, encoding="utf-8") as handle:
+        source = json.load(handle)
+    if source.get("apiVersion") != "arcturus.u128.org/project-spec/v1":
+        raise SystemExit("project spec must use arcturus.u128.org/project-spec/v1")
+    manifest = {
+        "apiVersion": "arcturus.u128.org/v2", "kind": "ServiceRelease",
+        "metadata": {"name": os.environ["SETUP_SERVICE"], "revision": "0" * 40},
+        "spec": {key: source.get(key, default) for key, default in {
+            "components": {}, "networks": [], "routing": {},
+            "deployment": {"timeoutSeconds": 300, "rollbackOnFailure": True},
+        }.items()},
+    }
+    if not manifest["spec"]["components"]:
+        raise SystemExit("project spec requires at least one component")
+    with open(sys.argv[1], "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+        handle.write("\n")
+    raise SystemExit(0)
+service_type = os.environ["SETUP_SERVICE_TYPE"]
+component = {
+    "image": os.environ["SETUP_IMAGE"] + "@sha256:" + "0" * 64,
+    "containerName": os.environ["SETUP_SERVICE"],
+    "mode": {"worker": "service"}.get(service_type, service_type if service_type != "web" else "service"),
+    "networks": [os.environ["SETUP_NETWORK"]],
+    "restart": os.environ["SETUP_RESTART"],
+}
+health_kind = os.environ["SETUP_HEALTH_KIND"]
+if health_kind in {"command", "node", "python"}:
+    component["healthCheck"] = {"command": os.environ["SETUP_HEALTH_COMMAND"]}
+if service_type == "scheduled":
+    component["schedule"] = {"onCalendar": os.environ["SETUP_SCHEDULE"], "persistent": True, "runOnDeploy": False}
+if os.environ["SETUP_EXPOSURE"] == "host":
+    component["ports"] = [{"container": int(os.environ["SETUP_PORT"]), "hostIp": "127.0.0.1"}]
+manifest = {
+    "apiVersion": "arcturus.u128.org/v2",
+    "kind": "ServiceRelease",
+    "metadata": {"name": os.environ["SETUP_SERVICE"], "revision": "0" * 40},
+    "spec": {
+        "components": {os.environ["SETUP_COMPONENT"]: component},
+        "networks": [{"name": os.environ["SETUP_NETWORK"], "external": True}],
+        "routing": {},
+        "deployment": {"timeoutSeconds": 300, "rollbackOnFailure": True},
+    },
+}
+if service_type == "web" and os.environ["SETUP_EXPOSURE"] == "public":
+    manifest["spec"]["routing"]["web"] = {
+        "component": os.environ["SETUP_COMPONENT"], "port": int(os.environ["SETUP_PORT"]),
+        "protocol": "http", "domains": [os.environ["SETUP_DOMAIN"]]
+    }
+with open(sys.argv[1], "w") as handle:
+    json.dump(manifest, handle, indent=2)
+    handle.write("\n")
+PY
+
+  SETUP_SERVICE="$SERVICE" SETUP_COMPONENT="$COMPONENT" SETUP_IMAGE="$IMAGE_REPOSITORY" \
+  SETUP_CONTAINERFILE="$CONTAINERFILE" SETUP_VALIDATION_TARGETS="$VALIDATION_TARGETS" \
+  SETUP_RELEASE_TARGET="$RELEASE_TARGET" \
+  SETUP_DEPLOY_URL="$DEPLOY_URL" SETUP_CI="$CI_PROVIDER" \
+  SETUP_EXPOSURE="$EXPOSURE" SETUP_DOMAIN="$DOMAIN" \
+  SETUP_PUBLIC_VERIFICATION="$PUBLIC_VERIFICATION" SETUP_PROJECT_SPEC="$PROJECT_SPEC" \
+  SETUP_ALLOW_NO_TESTS="$ALLOW_NO_TESTS" \
+  python3 - "$work/.arcturus/project.json" <<'PY'
+import json, os, sys
+
+image = os.environ["SETUP_IMAGE"]
+containerfile = os.environ["SETUP_CONTAINERFILE"]
+spec_path = os.environ["SETUP_PROJECT_SPEC"]
+source = {}
+if spec_path:
+    with open(spec_path, encoding="utf-8") as handle:
+        source = json.load(handle)
+    if source.get("apiVersion") != "arcturus.u128.org/project-spec/v1":
+        raise SystemExit("project spec must use arcturus.u128.org/project-spec/v1")
+project = {
+    "apiVersion": "arcturus.u128.org/project/v1",
+    "service": os.environ["SETUP_SERVICE"],
+    "manifest": "arcturus.release.json",
+    "ci": {
+        "provider": os.environ["SETUP_CI"],
+        "apiUrl": os.environ["SETUP_DEPLOY_URL"],
+        "storage": "isolated",
+        "deployTokenSecret": "ARCTURUS_DEPLOY_TOKEN",
+        "testIntent": ({"mode": "waived", "reason": "explicit --allow-no-tests"}
+                       if os.environ["SETUP_ALLOW_NO_TESTS"] == "true"
+                       else {"mode": "command"}),
+    },
+    "registry": {
+        "host": image.split("/", 1)[0],
+        "userSecret": "REGISTRY_USER",
+        "tokenSecret": "REGISTRY_TOKEN",
+    },
+    "builds": source.get("builds", {
+        os.environ["SETUP_COMPONENT"]: {
+            "repository": image,
+            "context": ".",
+            "containerfile": containerfile,
+            "validationTargets": os.environ["SETUP_VALIDATION_TARGETS"].split(","),
+            "releaseTarget": None if os.environ["SETUP_RELEASE_TARGET"] == "-" else os.environ["SETUP_RELEASE_TARGET"],
+            "components": [os.environ["SETUP_COMPONENT"]],
+        }
+    }),
+    "fixedComponents": source.get("fixedComponents", []),
+    "verification": source.get("verification", {
+        "publicUrl": (
+            "https://" + os.environ["SETUP_DOMAIN"]
+            if os.environ["SETUP_EXPOSURE"] == "public" else None
+        ),
+        "publicMode": os.environ["SETUP_PUBLIC_VERIFICATION"],
+        "requireRouting": os.environ["SETUP_EXPOSURE"] == "public",
+    }),
+}
+if spec_path and not project["builds"]:
+    raise SystemExit("project spec requires at least one build")
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(project, handle, indent=2)
+    handle.write("\n")
+PY
+
+  cat >"$work/.arcturus/lock.env" <<EOF
+ARCTURUS_SCHEMA_VERSION=arcturus.u128.org/v2
+ARCTURUS_BUNDLE=$BUNDLE
+EOF
+  printf '#!/usr/bin/env bash\nset -euo pipefail\n%s\n' "$TEST_COMMAND" >"$work/scripts/arcturus-ci-test"
+  cat >"$work/scripts/arcturus-tool" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if command -v arcturusctl >/dev/null 2>&1; then exec arcturusctl "$@"; fi
+bundle="$(sed -n 's/^ARCTURUS_BUNDLE=//p' .arcturus/lock.env)"
+[[ "$bundle" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "Install arcturusctl or configure a digest-pinned ARCTURUS_BUNDLE." >&2; exit 2; }
+exec podman run --rm --security-opt label=disable -v "$PWD:/workspace" -w /workspace \
+  -e ARCTURUS_DEPLOY_TOKEN -e ARCTURUS_API_URL "$bundle" "$@"
+EOF
+  cat >"$work/scripts/arcturus-release" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+revision="\${1:?revision required}"; digest_file="\${2:-image.digest}"
+digest="\$(tr -d '[:space:]' <"\$digest_file")"
+[[ "\$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "invalid image digest" >&2; exit 1; }
+exec ./scripts/arcturus-tool project render .arcturus/project.json \
+  --revision "\$revision" --digest "$COMPONENT=\$digest_file" \
+  --output release.json --request-output deployment-request.json
+EOF
+  cat >"$work/scripts/arcturus-deploy" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exec ./scripts/arcturus-tool project deploy .arcturus/project.json --request deployment-request.json
+EOF
+  cat >"$work/scripts/arcturus-service" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+action="\${1:-status}"; shift || true
+case "\$action" in
+  status|enable|disable|remove|rollback) exec ./scripts/arcturus-tool project "\$action" .arcturus/project.json "\$@" ;;
+  *) echo "usage: \$0 status|rollback|enable|disable|remove" >&2; exit 2 ;;
+esac
+EOF
+
+  for script in arcturus-guard arcturus-tool arcturus-ci arcturus-lifecycle arcturus-acceptance arcturus-host-acceptance; do
+    install -m 0755 "$BLUEPRINT_ROOT/scripts/$script" "$work/scripts/$script"
+  done
+
+  workflow_dir=".gitea/workflows"
+  [[ "$CI_PROVIDER" == github ]] && workflow_dir=".github/workflows"
+  if [[ "$CI_PROVIDER" =~ ^(gitea|github)$ ]]; then
+    mkdir -p "$work/$workflow_dir"
+    cat >"$work/$workflow_dir/deploy.yaml" <<EOF
+name: Arcturus deployment
+on:
+  push:
+    branches: [main]
+concurrency:
+  group: arcturus-$SERVICE
+  cancel-in-progress: false
+env:
+  ARCTURUS_REGISTRY_HOST: "${IMAGE_REPOSITORY%%/*}"
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build, deploy, and verify immutable release
+        env:
+          REGISTRY_USER: \${{ secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: \${{ secrets.REGISTRY_TOKEN }}
+          ARCTURUS_DEPLOY_TOKEN: \${{ secrets.ARCTURUS_DEPLOY_TOKEN }}
+        run: ./scripts/arcturus-ci '\${{ github.sha }}'
+EOF
+    cat >"$work/$workflow_dir/lifecycle.yaml" <<EOF
+name: Arcturus lifecycle
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "status, rollback, disable, enable, or remove"
+        required: true
+      confirm:
+        description: "Type $SERVICE to confirm"
+        required: true
+concurrency:
+  group: arcturus-$SERVICE
+  cancel-in-progress: false
+env:
+  ARCTURUS_REGISTRY_HOST: "${IMAGE_REPOSITORY%%/*}"
+jobs:
+  lifecycle:
+    if: \${{ github.event.inputs.confirm == '$SERVICE' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Run lifecycle operation through arcturusctl
+        env:
+          REGISTRY_USER: \${{ secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: \${{ secrets.REGISTRY_TOKEN }}
+          ARCTURUS_DEPLOY_TOKEN: \${{ secrets.ARCTURUS_DEPLOY_TOKEN }}
+        run: ./scripts/arcturus-lifecycle '\${{ github.event.inputs.operation }}'
+EOF
+    cat >"$work/$workflow_dir/acceptance.yaml" <<EOF
+name: Arcturus rollback acceptance
+on:
+  workflow_dispatch:
+concurrency:
+  group: arcturus-$SERVICE
+  cancel-in-progress: false
+env:
+  ARCTURUS_REGISTRY_HOST: "${IMAGE_REPOSITORY%%/*}"
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build current release and prove automatic rollback
+        env:
+          REGISTRY_USER: \${{ secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: \${{ secrets.REGISTRY_TOKEN }}
+          ARCTURUS_DEPLOY_TOKEN: \${{ secrets.ARCTURUS_DEPLOY_TOKEN }}
+        run: ./scripts/arcturus-ci '\${{ github.sha }}' --acceptance
+EOF
+  fi
+
+  if $LOCAL_COMPOSE; then
+    cat >"$work/compose.yaml" <<EOF
+# Local development only. Production is owned by Arcturus Quadlets and systemd.
+services:
+  $COMPONENT:
+    build: .
+    image: $IMAGE_REPOSITORY:dev
+    restart: $RESTART
+EOF
+  fi
+
+  mkdir -p "$PROJECT_DIR/.arcturus/updates"
+  state_file="$PROJECT_DIR/.arcturus/managed-files.sha256"
+  declare -A previous=()
+  if [[ -f "$state_file" ]]; then
+    while read -r digest path; do previous["$path"]="$digest"; done <"$state_file"
+  fi
+  new_state="$work/managed-files.sha256"
+  : >"$new_state"
+  install_generated() {
+    local relative="$1" source="$work/$1" target="$PROJECT_DIR/$1" desired current old update backup record=true
+    desired="$(sha256sum "$source" | cut -d' ' -f1)"
+    old="${previous[$relative]:-}"
+    current=""; [[ -f "$target" ]] && current="$(sha256sum "$target" | cut -d' ' -f1)"
+    if [[ ! -e "$target" || "$current" == "$old" || "$current" == "$desired" ]]; then
+      if ! $DRY_RUN; then mkdir -p "$(dirname "$target")"; install -m 0644 "$source" "$target"; fi
+    elif $FORCE; then
+      backup="$target.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+      if ! $DRY_RUN; then cp -a "$target" "$backup"; install -m 0644 "$source" "$target"; fi
+      echo "Replaced $relative; backup: $backup"
+    else
+      update="$PROJECT_DIR/.arcturus/updates/$relative.new"
+      if ! $DRY_RUN; then mkdir -p "$(dirname "$update")"; install -m 0644 "$source" "$update"; fi
+      echo "Preserved modified $relative; proposed update: $update" >&2
+      if [[ -n "$old" ]]; then desired="$old"; else record=false; fi
+    fi
+    $record && printf '%s  %s\n' "$desired" "$relative" >>"$new_state"
+    return 0
+  }
+
+  generated=(AGENTS.md arcturus.release.json .arcturus/lock.env scripts/arcturus-guard scripts/arcturus-ci-test scripts/arcturus-tool scripts/arcturus-ci scripts/arcturus-lifecycle scripts/arcturus-acceptance scripts/arcturus-host-acceptance scripts/arcturus-release scripts/arcturus-deploy scripts/arcturus-service)
+  [[ "$CI_PROVIDER" =~ ^(gitea|github)$ ]] && generated+=("$workflow_dir/deploy.yaml" "$workflow_dir/lifecycle.yaml" "$workflow_dir/acceptance.yaml")
+  $LOCAL_COMPOSE && generated+=(compose.yaml)
+  for relative in "${generated[@]}"; do install_generated "$relative"; done
+  if ! $DRY_RUN; then
+    if [[ ! -f "$PROJECT_DIR/.arcturus/project.json" ]]; then
+      install -m 0644 "$work/.arcturus/project.json" "$PROJECT_DIR/.arcturus/project.json"
+    elif ! grep -q '"apiVersion": "arcturus.u128.org/project/v1"' "$PROJECT_DIR/.arcturus/project.json"; then
+      install -m 0644 "$work/.arcturus/project.json" "$PROJECT_DIR/.arcturus/updates/project.json.new"
+      echo "Preserved project-owned .arcturus/project.json; schema update staged at .arcturus/updates/project.json.new" >&2
+    fi
+    chmod 0755 "$PROJECT_DIR/scripts/arcturus-"* "$PROJECT_DIR/scripts/arcturus-tool"
+    install -m 0644 "$new_state" "$state_file"
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+      mkdir -p "$(dirname "$CONFIG_FILE")"
+      cat >"$CONFIG_FILE" <<EOF
+# Non-secret Arcturus project configuration. CLI flags and environment override it.
+ARCTURUS_SERVICE=$SERVICE
+ARCTURUS_COMPONENT=$COMPONENT
+ARCTURUS_PROJECT_SPEC=$PROJECT_SPEC
+ARCTURUS_SERVICE_TYPE=$SERVICE_TYPE
+ARCTURUS_IMAGE_REPOSITORY=$IMAGE_REPOSITORY
+ARCTURUS_CONTAINERFILE=$CONTAINERFILE
+ARCTURUS_VALIDATION_TARGETS=$VALIDATION_TARGETS
+ARCTURUS_RELEASE_TARGET=$RELEASE_TARGET
+ARCTURUS_EXPOSURE=$EXPOSURE
+ARCTURUS_PORT=$PORT
+ARCTURUS_DOMAIN=$DOMAIN
+ARCTURUS_TLS_MODE=$TLS_MODE
+ARCTURUS_HEALTH_KIND=$HEALTH_KIND
+ARCTURUS_HEALTH_PATH=$HEALTH_PATH
+ARCTURUS_PUBLIC_VERIFICATION=$PUBLIC_VERIFICATION
+ARCTURUS_SCHEDULE=$SCHEDULE
+ARCTURUS_RESTART=$RESTART
+ARCTURUS_NETWORK=$NETWORK
+ARCTURUS_DEPLOY_URL=$DEPLOY_URL
+ARCTURUS_CI=$CI_PROVIDER
+ARCTURUS_TEST_COMMAND=$TEST_COMMAND
+ARCTURUS_BUNDLE=$BUNDLE
+EOF
+    fi
+    touch "$PROJECT_DIR/.gitignore"
+    if ! grep -q '^# BEGIN ARCTURUS GENERATED$' "$PROJECT_DIR/.gitignore"; then
+      cat >>"$PROJECT_DIR/.gitignore" <<'EOF'
+
+# BEGIN ARCTURUS GENERATED
+.arcturus/build/
+.arcturus/updates/
+image.digest
+release.json
+deployment-request.json
+deployment-response.json
+.env
+.env.*
+!.env.example
+# END ARCTURUS GENERATED
+EOF
+    fi
+  fi
+  echo "Arcturus project bootstrap complete for $SERVICE."
+fi
+
+if [[ "$MODE" =~ ^(host|all)$ ]]; then
+  if [[ -z "$ARCTURUS_SOURCE" ]]; then
+    candidate="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/../arcturus"
+    [[ -f "$candidate/deploy/install-host.sh" ]] && ARCTURUS_SOURCE="$candidate"
+  fi
+  installer=""
+  host_args=(--network "$NETWORK" --host-user "$HOST_USER")
+  [[ -n "$LISTEN_ADDRESS" ]] && host_args+=(--listen-address "$LISTEN_ADDRESS")
+  [[ -n "$HOST_BASE_DOMAIN" ]] && host_args+=(--base-domain "$HOST_BASE_DOMAIN")
+  [[ -n "$HOST_CERT_DOMAIN" ]] && host_args+=(--cert-domain "$HOST_CERT_DOMAIN")
+  [[ -n "$HOST_VHOSTS_DIR" ]] && host_args+=(--vhosts-dir "$HOST_VHOSTS_DIR")
+  [[ -n "$HOST_NGINX_CONTAINER" ]] && host_args+=(--nginx-container "$HOST_NGINX_CONTAINER")
+  [[ -n "$RUNNER_CIDR" ]] && host_args+=(--runner-cidr "$RUNNER_CIDR")
+  $CONFIGURE_FIREWALL && host_args+=(--configure-firewall)
+  for root in "${ALLOWED_BIND_ROOTS[@]}"; do host_args+=(--allowed-bind-root "$root"); done
+  $DRY_RUN && host_args+=(--dry-run)
+  if [[ -n "$ARCTURUS_SOURCE" ]]; then
+    installer="$ARCTURUS_SOURCE/deploy/install-host.sh"
+    host_args+=(--source-dir "$ARCTURUS_SOURCE/deploy")
+  else
+    [[ -n "$BUNDLE" ]] || { echo "host setup requires --bundle or --arcturus-source" >&2; exit 2; }
+    if $DRY_RUN; then
+      echo "Arcturus host bootstrap would extract and install pinned bundle: $BUNDLE"
+      exit 0
+    fi
+    command -v podman >/dev/null 2>&1 || { echo "host bundle bootstrap requires podman" >&2; exit 2; }
+    bootstrap="$(mktemp -d)"
+    container_id=""
+    cleanup_bootstrap() {
+      [[ -z "$container_id" ]] || podman rm "$container_id" >/dev/null 2>&1 || true
+      rm -rf "$bootstrap"
+    }
+    trap cleanup_bootstrap EXIT
+    podman pull "$BUNDLE" >/dev/null
+    container_id="$(podman create "$BUNDLE")"
+    podman cp "$container_id:/opt/arcturus/deploy/install-host.sh" "$bootstrap/install-host.sh"
+    installer="$bootstrap/install-host.sh"
+    host_args+=(--bundle "$BUNDLE")
+  fi
+  bash "$installer" "${host_args[@]}"
+fi

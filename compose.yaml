@@ -1,0 +1,18 @@
+# Arcturus Service Template
+# Adapt this file for your new application!
+
+networks:
+  default:
+    name: internal_routing
+    external: true
+
+services:
+  # Replace this name when bootstrapping a real project.
+  my-app:
+    # Local development only. Production is rendered from arcturus.release.json.
+    image: ${MY_APP_IMAGE:-localhost/my-app:latest}
+    container_name: my-app
+    restart: unless-stopped
+    # Keep local secrets in an ignored developer .env; production uses Podman secrets.
+    # volumes:
+    #   - ./data:/app/data:z

@@ -1,0 +1,48 @@
+name: Validate blueprint
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Test idempotent bootstrap
+        run: ./tests/test-setup.sh
+      - name: Validate deployment contract
+        run: ./scripts/arcturus-guard
+      - name: Validate shell entrypoints
+        run: |
+          bash -n scripts/arcturus-setup scripts/arcturus-tool scripts/arcturus-ci \
+            scripts/arcturus-lifecycle scripts/arcturus-acceptance scripts/arcturus-host-acceptance \
+            scripts/arcturus-release scripts/arcturus-deploy scripts/arcturus-service \
+            scripts/arcturus-guard examples/ci/generic.sh
+      - name: Validate JSON
+        run: |
+          set -euo pipefail
+          while IFS= read -r file; do python3 -m json.tool "$file" >/dev/null; done \
+            < <(find . -type f -name '*.json' -not -path './.git/*' | sort)
+
+      - name: Validate local Markdown links
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          roots = [Path('README.md'), Path('AGENTS.md'), Path('CONTRIBUTING.md'), Path('SECURITY.md'), *Path('docs').rglob('*.md')]
+          broken = []
+          for document in roots:
+              text = document.read_text(encoding='utf-8')
+              for target in re.findall(r'\[[^]]+\]\(([^)]+)\)', text):
+                  if target.startswith(('http://', 'https://', 'mailto:', '#')):
+                      continue
+                  path = target.split('#', 1)[0]
+                  if path and not (document.parent / path).resolve().exists():
+                      broken.append(f'{document}: {target}')
+          if broken:
+              raise SystemExit('Broken Markdown links:\n' + '\n'.join(broken))
+          PY
