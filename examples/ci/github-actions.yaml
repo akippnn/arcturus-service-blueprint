@@ -1,0 +1,21 @@
+# Select with: scripts/arcturus-setup init ... --ci github
+name: Arcturus deployment
+on:
+  push:
+    branches: [main]
+concurrency:
+  group: arcturus-example-service
+  cancel-in-progress: false
+env:
+  ARCTURUS_REGISTRY_HOST: registry.example.org
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build, deploy, and verify
+        run: ./scripts/arcturus-ci "$GITHUB_SHA"
+        env:
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          ARCTURUS_DEPLOY_TOKEN: ${{ secrets.ARCTURUS_DEPLOY_TOKEN }}

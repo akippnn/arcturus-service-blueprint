@@ -1,0 +1,21 @@
+name: Feature request
+description: Propose a generator or project-contract improvement
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Project onboarding or deployment problem
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed generated behavior
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Existing-project compatibility and migration impact

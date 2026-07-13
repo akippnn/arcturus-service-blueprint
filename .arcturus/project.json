@@ -1,0 +1,33 @@
+{
+  "apiVersion": "arcturus.u128.org/project/v1",
+  "service": "my-app",
+  "manifest": "arcturus.release.json",
+  "ci": {
+    "provider": "gitea",
+    "apiUrl": "http://127.0.0.1:9090",
+    "storage": "isolated",
+    "deployTokenSecret": "ARCTURUS_DEPLOY_TOKEN",
+    "testIntent": {"mode": "command"}
+  },
+  "registry": {
+    "host": "registry.example.org",
+    "userSecret": "REGISTRY_USER",
+    "tokenSecret": "REGISTRY_TOKEN"
+  },
+  "builds": {
+    "app": {
+      "repository": "registry.example.org/team/my-app",
+      "context": ".",
+      "containerfile": "Containerfile",
+      "validationTargets": ["test"],
+      "releaseTarget": "runtime",
+      "components": ["app"]
+    }
+  },
+  "fixedComponents": [],
+  "verification": {
+    "publicUrl": "https://app.example.org",
+    "publicMode": "http-success",
+    "requireRouting": true
+  }
+}

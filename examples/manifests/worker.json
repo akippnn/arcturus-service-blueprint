@@ -1,0 +1,19 @@
+{
+  "apiVersion": "arcturus.u128.org/v2",
+  "kind": "ServiceRelease",
+  "metadata": {"name": "example-worker", "revision": "0000000000000000000000000000000000000000"},
+  "spec": {
+    "components": {
+      "worker": {
+        "image": "registry.example.org/team/worker@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "mode": "service",
+        "restart": "on-failure",
+        "networks": ["internal_routing"],
+        "secrets": [{"name": "worker-queue-url", "type": "env", "target": "QUEUE_URL"}]
+      }
+    },
+    "networks": [{"name": "internal_routing", "external": true}],
+    "routing": {},
+    "deployment": {"timeoutSeconds": 300, "rollbackOnFailure": true}
+  }
+}

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+revision="${1:?revision required}"
+digest_file="${2:-image.digest}"
+digest="$(tr -d '[:space:]' <"$digest_file")"
+[[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "invalid image digest" >&2; exit 1; }
+exec ./scripts/arcturus-tool project render .arcturus/project.json \
+  --revision "$revision" --digest "app=$digest_file" \
+  --output release.json --request-output deployment-request.json

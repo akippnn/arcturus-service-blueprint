@@ -1,0 +1,56 @@
+{
+  "apiVersion": "arcturus.u128.org/v2",
+  "kind": "ServiceRelease",
+  "metadata": {"name": "stellar-like", "revision": "0000000000000000000000000000000000000000"},
+  "spec": {
+    "components": {
+      "postgres": {
+        "image": "docker.io/library/postgres@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "containerName": "stellar-like-postgres",
+        "environment": {"POSTGRES_DB": "app", "POSTGRES_USER": "app"},
+        "secrets": [{"name": "stellar-like-postgres-password-v1", "type": "env", "target": "POSTGRES_PASSWORD"}],
+        "volumes": [{"source": "legacy_project_postgres", "target": "/var/lib/postgresql/data", "type": "volume", "external": true}],
+        "networks": ["app"],
+        "healthCheck": {"command": "pg_isready -U app -d app"},
+        "restart": "always"
+      },
+      "redis": {
+        "image": "docker.io/library/redis@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "containerName": "stellar-like-redis",
+        "networks": ["app"],
+        "healthCheck": {"command": "redis-cli ping"},
+        "restart": "always"
+      },
+      "api": {
+        "image": "registry.example.org/example/stellar-like-api@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "containerName": "stellar-like-api",
+        "secrets": [{"name": "stellar-like-database-url-v1", "type": "env", "target": "DATABASE_URL"}],
+        "dependsOn": ["postgres", "redis"],
+        "networks": ["app"],
+        "restart": "always"
+      },
+      "db-init": {
+        "image": "registry.example.org/example/stellar-like-web@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "containerName": "stellar-like-db-init",
+        "mode": "oneshot",
+        "command": ["sh", "-c", "./migrate && ./seed"],
+        "secrets": [{"name": "stellar-like-database-url-v1", "type": "env", "target": "DATABASE_URL"}],
+        "dependsOn": ["postgres"],
+        "networks": ["app"],
+        "restart": "no"
+      },
+      "web": {
+        "image": "registry.example.org/example/stellar-like-web@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "containerName": "stellar-like-web",
+        "secrets": [{"name": "stellar-like-session-v1", "type": "env", "target": "SESSION_SECRET"}],
+        "dependsOn": ["api", "db-init"],
+        "networks": ["app", "internal_routing"],
+        "healthCheck": {"command": "node -e \"fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""},
+        "restart": "always"
+      }
+    },
+    "networks": [{"name": "app", "external": false}, {"name": "internal_routing", "external": true}],
+    "routing": {"web": {"component": "web", "port": 3000, "domains": ["stellar-like.example.org"]}},
+    "deployment": {"timeoutSeconds": 600, "rollbackOnFailure": true}
+  }
+}

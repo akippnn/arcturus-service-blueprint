@@ -1,0 +1,26 @@
+{
+  "apiVersion": "arcturus.u128.org/v2",
+  "kind": "ServiceRelease",
+  "metadata": {"name": "example-portal", "revision": "0000000000000000000000000000000000000000"},
+  "spec": {
+    "components": {
+      "assets": {
+        "image": "registry.example.org/example/portal@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "mode": "oneshot",
+        "command": ["sh", "-c", "cp -a /usr/share/nginx/html/. /export/"],
+        "volumes": [{"source": "/srv/portal/fallback", "target": "/export", "type": "bind", "selinuxRelabel": "shared"}],
+        "restart": "no"
+      },
+      "web": {
+        "image": "registry.example.org/example/portal@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "containerName": "example-portal",
+        "dependsOn": ["assets"],
+        "networks": ["internal_routing"],
+        "restart": "always"
+      }
+    },
+    "networks": [{"name": "internal_routing", "external": true}],
+    "routing": {"web": {"component": "web", "port": 80, "domains": ["portal.example.org"]}},
+    "deployment": {"timeoutSeconds": 300, "rollbackOnFailure": true}
+  }
+}

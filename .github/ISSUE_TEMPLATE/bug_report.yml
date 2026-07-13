@@ -1,0 +1,32 @@
+name: Bug report
+description: Report a reproducible blueprint or generated-project defect
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, private host data, or unredacted CI logs.
+  - type: input
+    id: version
+    attributes:
+      label: Blueprint version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Setup command or relevant project configuration
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true

@@ -1,0 +1,29 @@
+{
+  "apiVersion": "arcturus.u128.org/v2",
+  "kind": "ServiceRelease",
+  "metadata": {
+    "name": "my-app",
+    "revision": "0000000000000000000000000000000000000000"
+  },
+  "spec": {
+    "components": {
+      "app": {
+        "image": "registry.example.org/team/my-app@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "containerName": "my-app",
+        "mode": "service",
+        "networks": ["internal_routing"],
+        "restart": "always"
+      }
+    },
+    "networks": [{"name": "internal_routing", "external": true}],
+    "routing": {
+      "web": {
+        "component": "app",
+        "port": 8080,
+        "protocol": "http",
+        "domains": ["app.example.org"]
+      }
+    },
+    "deployment": {"timeoutSeconds": 300, "rollbackOnFailure": true}
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "apiVersion": "arcturus.u128.org/v2",
+  "kind": "ServiceRelease",
+  "metadata": {"name": "example-job", "revision": "0000000000000000000000000000000000000000"},
+  "spec": {
+    "components": {
+      "job": {
+        "image": "registry.example.org/team/job@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "mode": "scheduled",
+        "restart": "no",
+        "schedule": {
+          "onCalendar": "*-*-* 02:00:00",
+          "persistent": true,
+          "randomizedDelaySeconds": 300,
+          "runOnDeploy": false
+        }
+      }
+    },
+    "networks": [{"name": "internal_routing", "external": true}],
+    "routing": {},
+    "deployment": {"timeoutSeconds": 300, "rollbackOnFailure": true}
+  }
+}
