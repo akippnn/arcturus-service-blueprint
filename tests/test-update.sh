@@ -69,4 +69,18 @@ before="$(sha256sum "$project/.arcturus/bootstrap.json")"
 "$project/scripts/arcturus-update" apply --project-dir "$project" --from "$source2" --dry-run
 [[ "$before" == "$(sha256sum "$project/.arcturus/bootstrap.json")" ]]
 
+mkdir -p "$project/.arcturus/blueprint"
+cp -a "$source2/." "$project/.arcturus/blueprint/"
+(
+  cd "$project"
+  ./scripts/arcturus-update apply
+)
+python3 - "$project/.arcturus/bootstrap.json" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1], encoding='utf-8'))
+assert state['blueprintCommit'] == 'unknown'
+assert len(state['blueprintFingerprintSha256']) == 64
+PY
+[[ "$(wc -l < "$project/.arcturus/bootstrap-history.jsonl")" -eq 3 ]]
+
 echo 'Updater tests passed.'
