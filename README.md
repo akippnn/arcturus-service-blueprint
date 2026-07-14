@@ -22,10 +22,10 @@ Production releases never run Terraform, reset a host Git checkout, deploy `late
 
 ## Bootstrap a project
 
-From a blueprint checkout:
+From a blueprint checkout, use the replayable updater wrapper:
 
 ```bash
-./scripts/arcturus-setup init \
+./scripts/arcturus-update bootstrap \
   --project-dir /path/to/my-api \
   --service my-api \
   --type web \
@@ -36,13 +36,13 @@ From a blueprint checkout:
   --non-interactive
 ```
 
-Omit values and `--non-interactive` for guided setup:
+The wrapper invokes `arcturus-setup init`, installs a project-local updater, and records the normalized setup command and blueprint identity. Omit values and `--non-interactive` for guided setup:
 
 ```bash
-./scripts/arcturus-setup init --project-dir /path/to/project
+./scripts/arcturus-update bootstrap --project-dir /path/to/project
 ```
 
-Run `./scripts/arcturus-setup init --help` for the complete project options. `host` and `all` modes can also validate or invoke the Arcturus host installer.
+Run `./scripts/arcturus-update --help` or `./scripts/arcturus-setup init --help` for complete options. `host` and `all` setup modes can also validate or invoke the Arcturus host installer.
 
 ## Generated contract
 
@@ -52,15 +52,34 @@ The generator creates or updates:
 | --- | --- |
 | `arcturus.release.json` | Sole production release manifest template |
 | `.arcturus/project.json` | Project-owned build, component mapping, CI, registry, and verification graph |
-| `.arcturus/project.env` | Non-secret convenience settings |
+| `.arcturus/project.env` | Non-secret convenience settings and canonical replay intent |
 | `.arcturus/lock.env` | Digest-pinned Arcturus tool bundle and schema lock |
-| `scripts/arcturus-*` | Guard, CI, deploy, verify, lifecycle, acceptance, and operator wrappers |
+| `.arcturus/bootstrap.json` | Current blueprint provenance and normalized setup command |
+| `.arcturus/bootstrap-history.jsonl` | Append-only successful bootstrap/update history |
+| `scripts/arcturus-*` | Guard, CI, deploy, verify, lifecycle, acceptance, operator, and update wrappers |
 | CI workflows | Gitea, GitHub, generic, or none, according to setup options |
 | `AGENTS.md` | Explicit deployment contract for automation and LLM agents |
 
 Secret values are never generated into tracked files.
 
 Re-running setup updates generator-owned files only while they remain unchanged. Local modifications are preserved and proposed replacements are written under `.arcturus/updates/`. `--force` creates a timestamped backup before replacement. `.arcturus/project.json` is always project-owned and is never overwritten automatically.
+
+## Update a project
+
+For an OptiScaler-like copy-and-apply flow, replace the ignored `.arcturus/blueprint/` directory in the application repository with a newer extracted blueprint, then run:
+
+```bash
+./scripts/arcturus-update apply --dry-run
+./scripts/arcturus-update apply
+```
+
+Alternatively, update directly from another checkout:
+
+```bash
+./scripts/arcturus-update apply --from /path/to/arcturus-service-blueprint
+```
+
+The updater replays `.arcturus/project.env`, preserves project-owned and locally modified files, updates itself safely, and records the blueprint version, source commit, tree fingerprint, and normalized command. See [Updating projects](docs/updating-projects.md).
 
 ## Build graph
 
@@ -121,6 +140,7 @@ Host operators use `scripts/arcturus-host-acceptance` for backup-gated reboot ve
 - [Documentation index](docs/README.md)
 - [Blueprint architecture](docs/architecture.md)
 - [Project configuration reference](docs/project-reference.md)
+- [Updating projects](docs/updating-projects.md)
 - [Secrets](docs/secrets.md)
 - [Operations and troubleshooting](docs/operations.md)
 - [Migration](docs/migration.md)
