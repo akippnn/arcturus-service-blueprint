@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.99.0-rc.2] - 2026-07-15
+
+### Added
+
+- Replayable project bootstrap and update workflow with blueprint provenance, normalized setup intent, and append-only update history
+- Machine-readable compatibility metadata and generated minimum-host capability locks
+- Authenticated host preflight before expensive application image builds
+- Declarative legacy Compose migration support in project specifications
+- Compatibility and project-update documentation for RC1 adoption and older deployment generations
+
+### Changed
+
+- Generated workflows support an explicit registry username while retaining GitHub and Gitea actor fallback
+- Build execution prefers isolated Buildah storage before Podman fallback
+- Setup validation isolates optional cross-repository host-installer testing from normal blueprint validation
+- Generated workflow names and deployment diagnostics are clearer and consistent across GitHub and Gitea
+
 ## [0.99.0-rc.1] - 2026-07-13
 
 ### Added
