@@ -1,5 +1,22 @@
 # Operations and troubleshooting
 
+## Deployment API credential
+
+`ARCTURUS_DEPLOY_TOKEN` is generated on the Arcturus host, not obtained from Gitea, GitHub, Cloudflare, or another API provider:
+
+```bash
+umask 077
+arcturusctl token create \
+  --database "$HOME/.config/arcturus/tokens.json" \
+  --service my-app \
+  --token-id my-app-ci \
+  --output "$HOME/.config/arcturus/my-app-ci.token"
+```
+
+Copy the contents of the output file into the protected CI secret `ARCTURUS_DEPLOY_TOKEN`. The generated deployment workflow performs an authenticated preflight before building application images.
+
+HTTP `401` means the token is missing or invalid. HTTP `403` means it is valid but not scoped to the project service. HTTP `502` with a response body containing `status: failed` means the request authenticated successfully, release activation failed, and Arcturus attempted rollback; inspect the returned `error` and `rollback` fields.
+
 ## Status and logs
 
 ```bash

@@ -1,4 +1,4 @@
-name: Arcturus lifecycle example
+name: Manage Arcturus deployment
 
 on:
   workflow_dispatch:
@@ -19,6 +19,7 @@ env:
 
 jobs:
   lifecycle:
+    name: Run lifecycle operation
     if: ${{ github.event.inputs.confirm == 'my-app' }}
     runs-on: ubuntu-latest
     steps:

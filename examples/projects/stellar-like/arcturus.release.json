@@ -51,6 +51,7 @@
     },
     "networks": [{"name": "app", "external": false}, {"name": "internal_routing", "external": true}],
     "routing": {"web": {"component": "web", "port": 3000, "domains": ["stellar-like.example.org"]}},
-    "deployment": {"timeoutSeconds": 600, "rollbackOnFailure": true}
+    "deployment": {"timeoutSeconds": 600, "rollbackOnFailure": true},
+    "migration": {"legacyCompose": [{"project": "legacy-project", "required": false, "cleanup": "retain"}]}
   }
 }

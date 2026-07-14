@@ -17,6 +17,10 @@ python3 -m json.tool "$web/.arcturus/project.json" >/dev/null
 test -f "$web/AGENTS.md"
 (cd "$web" && ./scripts/arcturus-guard)
 grep -q 'arcturus-ci' "$web/.gitea/workflows/deploy.yaml"
+grep -q '^name: Deploy example-web$' "$web/.gitea/workflows/deploy.yaml"
+grep -q '^name: Manage example-web$' "$web/.gitea/workflows/lifecycle.yaml"
+grep -q '^name: Test example-web rollback$' "$web/.gitea/workflows/acceptance.yaml"
+grep -q 'project preflight' "$web/scripts/arcturus-ci"
 ! grep -R -E 'DEPLOY_WEBHOOK_SECRET|REGISTRY_PASSWORD|/deploy(["[:space:]]|$)' "$web/.gitea/workflows"
 
 cp "$web/arcturus.release.json" "$web/arcturus.release.json.valid"
@@ -126,6 +130,7 @@ assert project["builds"]["web"]["components"] == ["web", "db-init"]
 assert set(project["fixedComponents"]) == {"postgres", "redis"}
 assert manifest["spec"]["components"]["web"]["image"] == manifest["spec"]["components"]["db-init"]["image"]
 assert manifest["spec"]["components"]["postgres"]["volumes"][0]["source"] == "legacy_project_postgres"
+assert manifest["spec"]["migration"]["legacyCompose"][0]["project"] == "legacy-project"
 PY
 
 stellar="$workspace/stellar-like"
@@ -143,13 +148,28 @@ assert set(manifest["spec"]["components"]) == {"postgres", "redis", "api", "db-i
 assert project["builds"]["web"]["components"] == ["web", "db-init"]
 assert manifest["spec"]["components"]["web"]["dependsOn"] == ["api", "db-init"]
 assert manifest["spec"]["routing"]["web"]["component"] == "web"
+assert manifest["spec"]["migration"]["legacyCompose"][0]["cleanup"] == "retain"
 PY
 grep -q 'ARCTURUS_BUILDAH_ROOT' "$root/scripts/arcturus-ci"
 ! grep -qE 'buildah (rmi|prune)|podman (image|system) prune' "$root/scripts/arcturus-ci"
+grep -q 'GITHUB_ACTOR' "$root/scripts/arcturus-ci"
+buildah_line="$(grep -n 'command -v buildah' "$root/scripts/arcturus-tool" | head -1 | cut -d: -f1)"
+podman_line="$(grep -n 'command -v podman' "$root/scripts/arcturus-tool" | head -1 | cut -d: -f1)"
+[[ "$buildah_line" -lt "$podman_line" ]]
+grep -q -- '--authfile "$REGISTRY_AUTH_FILE"' "$root/scripts/arcturus-tool"
+grep -q 'Buildah is required to pull the pinned Arcturus bundle' "$root/scripts/arcturus-lifecycle"
 
-if [[ -f "$root/../arcturus/deploy/install-host.sh" ]]; then
+if [[ "${ARCTURUS_TEST_HOST_INSTALLER:-false}" == true ]]; then
+  [[ -f "$root/../arcturus/deploy/install-host.sh" ]] || {
+    echo "ARCTURUS_TEST_HOST_INSTALLER=true requires a sibling arcturus checkout" >&2
+    exit 2
+  }
   "$root/../arcturus/deploy/install-host.sh" --source-dir "$root/../arcturus/deploy" \
     --host-home "$workspace/host-home" --base-domain example.org --dry-run >/dev/null
 fi
+
+grep -q '^ARCTURUS_MIN_VERSION=0.99.0-rc.2$' "$web/.arcturus/lock.env"
+grep -q '^ARCTURUS_REQUIRED_FEATURES=authenticated-preflight,legacy-compose-handoff$' "$web/.arcturus/lock.env"
+grep -q 'REGISTRY_USER:.*secrets.REGISTRY_USER' "$web/.gitea/workflows/deploy.yaml"
 
 echo "Blueprint setup tests passed."

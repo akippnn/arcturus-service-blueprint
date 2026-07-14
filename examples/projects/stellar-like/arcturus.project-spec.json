@@ -10,6 +10,7 @@
   "networks": [{"name": "app", "external": false}, {"name": "internal_routing", "external": true}],
   "routing": {"web": {"component": "web", "port": 3000, "domains": ["stellar-like.example.org"]}},
   "deployment": {"timeoutSeconds": 600, "rollbackOnFailure": true},
+  "migration": {"legacyCompose": [{"project": "legacy-project", "required": false, "cleanup": "retain"}]},
   "builds": {
     "api": {"repository": "registry.example.org/example/stellar-like-api", "context": ".", "containerfile": "services/api/Containerfile", "validationTargets": ["test"], "releaseTarget": "runtime", "components": ["api"]},
     "web": {"repository": "registry.example.org/example/stellar-like-web", "context": ".", "containerfile": "web/Containerfile", "validationTargets": ["builder"], "releaseTarget": "runtime", "components": ["web", "db-init"]}
