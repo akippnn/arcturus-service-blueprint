@@ -69,6 +69,7 @@ before="$(sha256sum "$project/.arcturus/bootstrap.json")"
 "$project/scripts/arcturus-update" apply --project-dir "$project" --from "$source2" --dry-run
 [[ "$before" == "$(sha256sum "$project/.arcturus/bootstrap.json")" ]]
 
+git -C "$project" init -q
 mkdir -p "$project/.arcturus/blueprint"
 cp -a "$source2/." "$project/.arcturus/blueprint/"
 (
