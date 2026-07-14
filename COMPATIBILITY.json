@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "product": "arcturus-service-blueprint",
+  "blueprintVersion": "0.99.0-rc.2",
+  "manifestApi": "arcturus.u128.org/v2",
+  "projectApi": "arcturus.u128.org/project/v1",
+  "minimumArcturusVersion": "0.99.0-rc.2",
+  "requiredFeatures": [
+    "authenticated-preflight",
+    "legacy-compose-handoff"
+  ],
+  "adoption": {
+    "automaticFrom": "0.99.0-rc.1 project-aware generation",
+    "legacyProjects": "one-time explicit bootstrap required"
+  }
+}

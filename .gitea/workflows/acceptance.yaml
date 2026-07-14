@@ -1,4 +1,4 @@
-name: Arcturus rollback acceptance example
+name: Test Arcturus rollback
 
 on:
   workflow_dispatch:
@@ -12,6 +12,7 @@ env:
 
 jobs:
   acceptance:
+    name: Prove automatic rollback
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
