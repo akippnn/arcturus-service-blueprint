@@ -6,9 +6,14 @@ revision="${1:-${GITHUB_SHA:-${CI_COMMIT_SHA:-}}}"
   echo "Arcturus CI requires the full 40-character commit SHA." >&2
   exit 2
 }
-for variable in REGISTRY_USER REGISTRY_TOKEN ARCTURUS_DEPLOY_TOKEN; do
+for variable in REGISTRY_TOKEN ARCTURUS_DEPLOY_TOKEN; do
   [[ -n "${!variable:-}" ]] || { echo "Required CI secret $variable is missing." >&2; exit 2; }
 done
+registry_user="${REGISTRY_USER:-${GITHUB_ACTOR:-${GITEA_ACTOR:-}}}"
+[[ -n "$registry_user" ]] || {
+  echo "Registry username is missing; set REGISTRY_USER or use a runner that exports GITHUB_ACTOR/GITEA_ACTOR." >&2
+  exit 2
+}
 command -v buildah >/dev/null 2>&1 || {
   echo "Buildah is required; application language toolchains are not required on the runner." >&2
   exit 2
@@ -38,9 +43,10 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 printf '%s' "$REGISTRY_TOKEN" | buildah --root "$graph" --runroot "$runroot" \
-  login --authfile "$authfile" --username "$REGISTRY_USER" --password-stdin \
+  login --authfile "$authfile" --username "$registry_user" --password-stdin \
   "${ARCTURUS_REGISTRY_HOST:?ARCTURUS_REGISTRY_HOST is required}"
 unset REGISTRY_TOKEN
+./scripts/arcturus-tool project preflight .arcturus/project.json --token-file "$token_file"
 ./scripts/arcturus-tool project validate .arcturus/project.json
 export ARCTURUS_PROJECT_VALIDATED=1
 ./scripts/arcturus-guard

@@ -6,9 +6,11 @@ The blueprint is the application-facing half of Arcturus. It generates repositor
 
 1. [Architecture](architecture.md)
 2. [Project configuration reference](project-reference.md)
-3. [Secrets](secrets.md)
-4. [Operations and troubleshooting](operations.md)
-5. [Migration](migration.md)
-6. [Extensions](extensions.md)
+3. [Compatibility](compatibility.md)
+4. [Updating projects](updating-projects.md)
+5. [Secrets](secrets.md)
+6. [Operations and troubleshooting](operations.md)
+7. [Migration](migration.md)
+8. [Extensions](extensions.md)
 
-The platform manifest schema and host installation are documented in the Arcturus repository.
+The platform manifest schema, host installation, host updates, and control-plane compatibility are documented in the Arcturus repository.

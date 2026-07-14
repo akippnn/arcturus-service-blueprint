@@ -1,5 +1,5 @@
 # Select with: scripts/arcturus-setup init ... --ci github
-name: Arcturus deployment
+name: Deploy example-service
 on:
   push:
     branches: [main]
@@ -10,6 +10,7 @@ env:
   ARCTURUS_REGISTRY_HOST: registry.example.org
 jobs:
   deploy:
+    name: Build, deploy, and verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
