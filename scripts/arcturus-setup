@@ -13,6 +13,8 @@ Project options:
   --project-spec FILE          Declarative multi-component project graph JSON
   --type web|worker|scheduled|oneshot
   --image-repository REPO      Registry repository without tag
+  --registry-transport-host HOST  Optional private registry host used for push/pull transport
+  --registry-transport-insecure  Use HTTP or untrusted TLS for the private transport only
   --containerfile PATH         Repository-relative Containerfile/Dockerfile
   --validation-target TARGETS Comma-separated test stages (default: test)
   --release-target TARGET      Production stage (default: runtime; '-' for final)
@@ -63,6 +65,8 @@ COMPONENT="${ARCTURUS_COMPONENT:-app}"
 PROJECT_SPEC="${ARCTURUS_PROJECT_SPEC:-}"
 SERVICE_TYPE="${ARCTURUS_SERVICE_TYPE:-web}"
 IMAGE_REPOSITORY="${ARCTURUS_IMAGE_REPOSITORY:-}"
+REGISTRY_TRANSPORT_HOST="${ARCTURUS_REGISTRY_TRANSPORT_HOST:-}"
+REGISTRY_TRANSPORT_TLS_VERIFY="${ARCTURUS_REGISTRY_TRANSPORT_TLS_VERIFY:-true}"
 CONTAINERFILE="${ARCTURUS_CONTAINERFILE:-}"
 VALIDATION_TARGETS="${ARCTURUS_VALIDATION_TARGETS:-test}"
 RELEASE_TARGET="${ARCTURUS_RELEASE_TARGET:-runtime}"
@@ -108,6 +112,8 @@ while (($#)); do
     --project-spec) PROJECT_SPEC="$2"; CLI_SET[project_spec]=1; shift 2 ;;
     --type) SERVICE_TYPE="$2"; CLI_SET[type]=1; shift 2 ;;
     --image-repository) IMAGE_REPOSITORY="$2"; CLI_SET[image]=1; shift 2 ;;
+    --registry-transport-host) REGISTRY_TRANSPORT_HOST="$2"; shift 2 ;;
+    --registry-transport-insecure) REGISTRY_TRANSPORT_TLS_VERIFY=false; shift ;;
     --containerfile) CONTAINERFILE="$2"; shift 2 ;;
     --validation-target) VALIDATION_TARGETS="$2"; shift 2 ;;
     --release-target) RELEASE_TARGET="$2"; shift 2 ;;
@@ -160,6 +166,8 @@ read_config() {
       ARCTURUS_PROJECT_SPEC) [[ -z "${ARCTURUS_PROJECT_SPEC+x}" && -z "${CLI_SET[project_spec]:-}" ]] && PROJECT_SPEC="$value" ;;
       ARCTURUS_SERVICE_TYPE) [[ -z "${ARCTURUS_SERVICE_TYPE+x}" && -z "${CLI_SET[type]:-}" ]] && SERVICE_TYPE="$value" ;;
       ARCTURUS_IMAGE_REPOSITORY) [[ -z "$IMAGE_REPOSITORY" ]] && IMAGE_REPOSITORY="$value" ;;
+      ARCTURUS_REGISTRY_TRANSPORT_HOST) [[ -z "$REGISTRY_TRANSPORT_HOST" ]] && REGISTRY_TRANSPORT_HOST="$value" ;;
+      ARCTURUS_REGISTRY_TRANSPORT_TLS_VERIFY) REGISTRY_TRANSPORT_TLS_VERIFY="$value" ;;
       ARCTURUS_CONTAINERFILE) [[ -z "$CONTAINERFILE" ]] && CONTAINERFILE="$value" ;;
       ARCTURUS_VALIDATION_TARGETS) VALIDATION_TARGETS="$value" ;;
       ARCTURUS_RELEASE_TARGET) RELEASE_TARGET="$value" ;;
@@ -276,6 +284,8 @@ if [[ "$MODE" != host ]]; then
   fi
   [[ -n "$IMAGE_REPOSITORY" ]] || errors+=("image repository is required and could not be detected")
   [[ "$IMAGE_REPOSITORY" =~ ^[a-z0-9][a-z0-9._-]*(:[0-9]+)?(/[a-z0-9._-]+)+$ ]] || errors+=("image repository must be fully qualified and contain no tag")
+  [[ -z "$REGISTRY_TRANSPORT_HOST" || "$REGISTRY_TRANSPORT_HOST" =~ ^[a-z0-9][a-z0-9.-]*(:[0-9]+)?$ ]] || errors+=("registry transport host is invalid")
+  [[ "$REGISTRY_TRANSPORT_TLS_VERIFY" =~ ^(true|false)$ ]] || errors+=("registry transport TLS verification must be true or false")
   [[ "$CONTAINERFILE" != /* && ! "$CONTAINERFILE" =~ (^|/)\.\.(/|$) && "$CONTAINERFILE" != *$'\n'* ]] || errors+=("containerfile must be a safe repository-relative path")
   [[ "$VALIDATION_TARGETS" =~ ^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$ ]] || errors+=("validation targets must be comma-separated stage names")
   [[ "$RELEASE_TARGET" == - || "$RELEASE_TARGET" =~ ^[A-Za-z0-9_.-]+$ ]] || errors+=("release target must be a stage name or '-'")
@@ -389,6 +399,10 @@ if service_type == "web" and os.environ["SETUP_EXPOSURE"] == "public":
         "component": os.environ["SETUP_COMPONENT"], "port": int(os.environ["SETUP_PORT"]),
         "protocol": "http", "domains": [os.environ["SETUP_DOMAIN"]]
     }
+    if health_kind == "systemd":
+        manifest["spec"]["routing"]["web"]["readinessWaiver"] = (
+            "operator explicitly selected systemd-only readiness"
+        )
 with open(sys.argv[1], "w") as handle:
     json.dump(manifest, handle, indent=2)
     handle.write("\n")
@@ -398,6 +412,8 @@ PY
   SETUP_CONTAINERFILE="$CONTAINERFILE" SETUP_VALIDATION_TARGETS="$VALIDATION_TARGETS" \
   SETUP_RELEASE_TARGET="$RELEASE_TARGET" \
   SETUP_DEPLOY_URL="$DEPLOY_URL" SETUP_CI="$CI_PROVIDER" \
+  SETUP_REGISTRY_TRANSPORT_HOST="$REGISTRY_TRANSPORT_HOST" \
+  SETUP_REGISTRY_TRANSPORT_TLS_VERIFY="$REGISTRY_TRANSPORT_TLS_VERIFY" \
   SETUP_EXPOSURE="$EXPOSURE" SETUP_DOMAIN="$DOMAIN" \
   SETUP_PUBLIC_VERIFICATION="$PUBLIC_VERIFICATION" SETUP_PROJECT_SPEC="$PROJECT_SPEC" \
   SETUP_ALLOW_NO_TESTS="$ALLOW_NO_TESTS" \
@@ -451,6 +467,11 @@ project = {
         "requireRouting": os.environ["SETUP_EXPOSURE"] == "public",
     }),
 }
+if os.environ["SETUP_REGISTRY_TRANSPORT_HOST"]:
+    project["registry"]["transportHost"] = os.environ["SETUP_REGISTRY_TRANSPORT_HOST"]
+    project["registry"]["transportTlsVerify"] = (
+        os.environ["SETUP_REGISTRY_TRANSPORT_TLS_VERIFY"] == "true"
+    )
 if spec_path and not project["builds"]:
     raise SystemExit("project spec requires at least one build")
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
@@ -515,6 +536,8 @@ concurrency:
   cancel-in-progress: false
 env:
   ARCTURUS_REGISTRY_HOST: "${IMAGE_REPOSITORY%%/*}"
+  ARCTURUS_REGISTRY_TRANSPORT_HOST: "$REGISTRY_TRANSPORT_HOST"
+  ARCTURUS_REGISTRY_TRANSPORT_TLS_VERIFY: "$REGISTRY_TRANSPORT_TLS_VERIFY"
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -543,6 +566,8 @@ concurrency:
   cancel-in-progress: false
 env:
   ARCTURUS_REGISTRY_HOST: "${IMAGE_REPOSITORY%%/*}"
+  ARCTURUS_REGISTRY_TRANSPORT_HOST: "$REGISTRY_TRANSPORT_HOST"
+  ARCTURUS_REGISTRY_TRANSPORT_TLS_VERIFY: "$REGISTRY_TRANSPORT_TLS_VERIFY"
 jobs:
   lifecycle:
     if: \${{ github.event.inputs.confirm == '$SERVICE' }}
@@ -565,6 +590,8 @@ concurrency:
   cancel-in-progress: false
 env:
   ARCTURUS_REGISTRY_HOST: "${IMAGE_REPOSITORY%%/*}"
+  ARCTURUS_REGISTRY_TRANSPORT_HOST: "$REGISTRY_TRANSPORT_HOST"
+  ARCTURUS_REGISTRY_TRANSPORT_TLS_VERIFY: "$REGISTRY_TRANSPORT_TLS_VERIFY"
 jobs:
   acceptance:
     runs-on: ubuntu-latest

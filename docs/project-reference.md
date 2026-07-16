@@ -34,12 +34,19 @@
 ```json
 {
   "host": "registry.example.org",
+  "transportHost": "registry.internal.example.org:5000",
+  "transportTlsVerify": false,
   "userSecret": "REGISTRY_USER",
   "tokenSecret": "REGISTRY_TOKEN"
 }
 ```
 
 Use a push-limited CI credential. The production host uses a separate pull-only credential.
+`transportHost` is optional. When set, CI authenticates and pushes through that private
+endpoint while release manifests retain the canonical repositories under `host`.
+`transportTlsVerify` defaults to `true`; set it to `false` only for a trusted,
+network-private HTTP endpoint or an endpoint with a private CA that is not installed
+in the runner.
 
 ## Builds
 

@@ -66,7 +66,7 @@ Re-running setup updates generator-owned files only while they remain unchanged.
 
 `.arcturus/project.json` maps build outputs to release components. One image digest may serve multiple components such as `web` and `db-init`; CI builds and pushes it once. Fixed infrastructure components must already use immutable digests.
 
-Validation targets run before release targets in isolated job-local Buildah storage. The runner does not need the application's language toolchain when tests are expressed as Containerfile validation stages.
+Validation targets run before release targets in isolated job-local Buildah storage. An unconditional exit trap removes working containers, prunes that isolated store, and deletes its credentials and files immediately after success, failure, or cancellation. The runner does not need the application's language toolchain when tests are expressed as Containerfile validation stages.
 
 For a declarative multi-component example, see [`examples/projects/stellar-like`](examples/projects/stellar-like). For a shared image plus one-shot asset export, see [`examples/projects/web-with-assets`](examples/projects/web-with-assets).
 

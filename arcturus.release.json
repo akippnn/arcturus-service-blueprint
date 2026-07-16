@@ -12,6 +12,9 @@
         "containerName": "my-app",
         "mode": "service",
         "networks": ["internal_routing"],
+        "healthCheck": {
+          "command": "wget -q -O /dev/null http://127.0.0.1:8080/health"
+        },
         "restart": "always"
       }
     },

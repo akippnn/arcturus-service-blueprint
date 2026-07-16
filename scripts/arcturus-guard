@@ -85,6 +85,10 @@ for route_name, route in manifest.get("spec", {}).get("routing", {}).items():
         raise SystemExit(f"route {route_name!r} requires an integer container port")
     if not 1 <= route["port"] <= 65535:
         raise SystemExit(f"route {route_name!r} has an invalid port")
+    if not component.get("healthCheck") and not route.get("readinessWaiver"):
+        raise SystemExit(
+            f"route {route_name!r} requires application readiness or a readinessWaiver"
+        )
 PY
 elif command -v arcturusctl >/dev/null 2>&1; then
   # Do not silently use a reduced node/jq implementation: the shipped CLI is the

@@ -19,10 +19,16 @@ export ARCTURUS_BUILDAH_ROOT="$work/storage"
 export ARCTURUS_BUILDAH_RUNROOT="$work/runroot"
 export REGISTRY_AUTH_FILE="$work/auth.json"
 cleanup() {
+  status=$?
+  trap - EXIT INT TERM
   buildah --root "$ARCTURUS_BUILDAH_ROOT" --runroot "$ARCTURUS_BUILDAH_RUNROOT" rm --all >/dev/null 2>&1 || true
-  rm -rf "$work"
+  buildah --root "$ARCTURUS_BUILDAH_ROOT" --runroot "$ARCTURUS_BUILDAH_RUNROOT" prune --all --force >/dev/null 2>&1 || true
+  rm -rf -- "$work"
+  exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 if ! command -v arcturusctl >/dev/null 2>&1 && ! command -v podman >/dev/null 2>&1; then
   printf '%s' "${REGISTRY_TOKEN:?REGISTRY_TOKEN is required to pull the CLI bundle}" | \
     buildah --root "$ARCTURUS_BUILDAH_ROOT" --runroot "$ARCTURUS_BUILDAH_RUNROOT" \

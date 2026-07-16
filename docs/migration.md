@@ -7,7 +7,7 @@
 5. Preserve internal application networks needed for database/cache traffic, but every routed component must also join `internal_routing`. Make migration/init one-shots idempotent, order them through `dependsOn`, and ensure a rerun against an already-migrated database succeeds safely.
 6. Render and validate a digest-pinned release. For public web services, confirm the active v2 routing metadata matches the existing domain and container port and wait for a matching router receipt rather than editing nginx.
 7. Before database migrations, record a rollback checkpoint: current deployment ID/digests, schema version, backup result, role/secret versions, and volume identity. Keep old runtime credentials usable by the previous-known-good release.
-8. Stop Compose/Watchtower ownership during a maintenance window, deploy through Arcturus, validate health, migrations, adopted data, and route receipt, then reboot-test declared critical units.
+8. Submit the v2 release and wait for successful activation, application health, and a matching verified route receipt. Only after v2 acceptance succeeds, stop and remove Compose/Watchtower ownership without deleting volumes or bind data, then reboot-test declared critical units.
 9. Deliberately deploy an unhealthy test release and prove automatic rollback restores the known-good digest and route. Complete two successful releases on new database credentials before revoking the old rollback credential.
 10. Retain Compose only for local development or documented emergency compatibility. Do not let Compose, Watchtower, and Quadlet own the same production container concurrently.
 

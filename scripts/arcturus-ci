@@ -13,6 +13,13 @@ command -v buildah >/dev/null 2>&1 || {
   echo "Buildah is required; application language toolchains are not required on the runner." >&2
   exit 2
 }
+transport_tls_verify="${ARCTURUS_REGISTRY_TRANSPORT_TLS_VERIFY:-true}"
+[[ "$transport_tls_verify" =~ ^(true|false)$ ]] || {
+  echo "ARCTURUS_REGISTRY_TRANSPORT_TLS_VERIFY must be true or false." >&2
+  exit 2
+}
+transport_tls_args=()
+[[ "$transport_tls_verify" == true ]] || transport_tls_args=(--tls-verify=false)
 
 run_id="${GITHUB_RUN_ID:-${CI_RUN_NUMBER:-$$}}-${GITHUB_RUN_ATTEMPT:-1}"
 work_rel=".arcturus/build/$run_id"
@@ -32,14 +39,22 @@ export REGISTRY_AUTH_FILE="$authfile"
 export ARCTURUS_BUILDAH_ROOT="$graph"
 export ARCTURUS_BUILDAH_RUNROOT="$runroot"
 cleanup() {
+  status=$?
+  trap - EXIT INT TERM
+  echo "Cleaning isolated Buildah storage for run $run_id."
   buildah --root "$graph" --runroot "$runroot" rm --all >/dev/null 2>&1 || true
-  rm -rf "$work"
+  buildah --root "$graph" --runroot "$runroot" prune --all --force >/dev/null 2>&1 || true
+  rm -rf -- "$work"
+  exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 printf '%s' "$REGISTRY_TOKEN" | buildah --root "$graph" --runroot "$runroot" \
-  login --authfile "$authfile" --username "$REGISTRY_USER" --password-stdin \
-  "${ARCTURUS_REGISTRY_HOST:?ARCTURUS_REGISTRY_HOST is required}"
+  login "${transport_tls_args[@]}" --authfile "$authfile" \
+  --username "$REGISTRY_USER" --password-stdin \
+  "${ARCTURUS_REGISTRY_TRANSPORT_HOST:-${ARCTURUS_REGISTRY_HOST:?ARCTURUS_REGISTRY_HOST is required}}"
 unset REGISTRY_TOKEN
 ./scripts/arcturus-tool project validate .arcturus/project.json
 export ARCTURUS_PROJECT_VALIDATED=1
@@ -65,8 +80,12 @@ while IFS=$'\t' read -r name repository context containerfile validations releas
   buildah --root "$graph" --runroot "$runroot" bud --authfile "$authfile" \
     --file "$containerfile" "${target_args[@]}" --tag "$repository:$revision" "$context"
   digest_file="$work_rel/$name.digest"
+  registry_host="${repository%%/*}"
+  transport_host="${ARCTURUS_REGISTRY_TRANSPORT_HOST:-$registry_host}"
+  transport_repository="$transport_host/${repository#*/}"
   buildah --root "$graph" --runroot "$runroot" push --authfile "$authfile" \
-    --digestfile "$digest_file" "$repository:$revision" "docker://$repository:$revision"
+    "${transport_tls_args[@]}" --digestfile "$digest_file" \
+    "$repository:$revision" "docker://$transport_repository:$revision"
   digest_args+=(--digest "$name=$digest_file")
 done <"$plan"
 

@@ -10,13 +10,22 @@ web="$workspace/web"
 "$root/scripts/arcturus-setup" init \
   --project-dir "$web" --service example-web --type web \
   --image-repository registry.example.org/team/example-web \
+  --registry-transport-host registry-transport.internal:5000 \
+  --registry-transport-insecure \
   --domain web.example.org --deploy-url http://192.0.2.10:9090 \
   --bundle "$bundle" --test-command true --systemd-health --non-interactive
 python3 -m json.tool "$web/arcturus.release.json" >/dev/null
 python3 -m json.tool "$web/.arcturus/project.json" >/dev/null
+python3 - "$web/.arcturus/project.json" <<'PY'
+import json, sys
+registry = json.load(open(sys.argv[1]))["registry"]
+assert registry["transportHost"] == "registry-transport.internal:5000"
+assert registry["transportTlsVerify"] is False
+PY
 test -f "$web/AGENTS.md"
 (cd "$web" && ./scripts/arcturus-guard)
 grep -q 'arcturus-ci' "$web/.gitea/workflows/deploy.yaml"
+grep -q 'ARCTURUS_REGISTRY_TRANSPORT_TLS_VERIFY: "false"' "$web/.gitea/workflows/deploy.yaml"
 ! grep -R -E 'DEPLOY_WEBHOOK_SECRET|REGISTRY_PASSWORD|/deploy(["[:space:]]|$)' "$web/.gitea/workflows"
 
 cp "$web/arcturus.release.json" "$web/arcturus.release.json.valid"
@@ -145,11 +154,15 @@ assert manifest["spec"]["components"]["web"]["dependsOn"] == ["api", "db-init"]
 assert manifest["spec"]["routing"]["web"]["component"] == "web"
 PY
 grep -q 'ARCTURUS_BUILDAH_ROOT' "$root/scripts/arcturus-ci"
-! grep -qE 'buildah (rmi|prune)|podman (image|system) prune' "$root/scripts/arcturus-ci"
+grep -Fq 'buildah --root "$graph" --runroot "$runroot" prune --all --force' "$root/scripts/arcturus-ci"
+grep -Fq "trap 'exit 143' TERM" "$root/scripts/arcturus-ci"
+! grep -qE '(^|[[:space:]])buildah (rmi|prune)|podman (image|system) prune' "$root/scripts/arcturus-ci"
 
 if [[ -f "$root/../arcturus/deploy/install-host.sh" ]]; then
+  mkdir -p "$workspace/host-home/stacks/portal/config/vhosts.d"
   "$root/../arcturus/deploy/install-host.sh" --source-dir "$root/../arcturus/deploy" \
-    --host-home "$workspace/host-home" --base-domain example.org --dry-run >/dev/null
+    --host-home "$workspace/host-home" --base-domain example.org \
+    --vhosts-dir "$workspace/host-home/stacks/portal/config/vhosts.d" --dry-run >/dev/null
 fi
 
 echo "Blueprint setup tests passed."

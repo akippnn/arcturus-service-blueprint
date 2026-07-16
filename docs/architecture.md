@@ -35,7 +35,7 @@ arcturusctl project deploy
 arcturusctl project verify
 ```
 
-Buildah storage, registry auth, and deployment-token files are job-local and removed by cleanup traps. Shared-image consumers reuse one resolved digest.
+Buildah storage, registry auth, and deployment-token files are job-local. Cleanup traps explicitly remove working containers, prune only the job-local Buildah root, and delete the run directory on success, failure, or cancellation. Shared-image consumers reuse one resolved digest.
 
 ## Verification contract
 
