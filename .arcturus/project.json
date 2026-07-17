@@ -7,21 +7,28 @@
     "apiUrl": "http://127.0.0.1:9090",
     "storage": "isolated",
     "deployTokenSecret": "ARCTURUS_DEPLOY_TOKEN",
-    "testIntent": {"mode": "command"}
+    "testIntent": {
+      "mode": "command"
+    }
   },
   "registry": {
     "host": "registry.example.org",
     "userSecret": "REGISTRY_USER",
-    "tokenSecret": "REGISTRY_TOKEN"
+    "tokenSecret": "REGISTRY_TOKEN",
+    "mode": "external"
   },
   "builds": {
     "app": {
       "repository": "registry.example.org/team/my-app",
       "context": ".",
       "containerfile": "Containerfile",
-      "validationTargets": ["test"],
+      "validationTargets": [
+        "test"
+      ],
       "releaseTarget": "runtime",
-      "components": ["app"]
+      "components": [
+        "app"
+      ]
     }
   },
   "fixedComponents": [],
@@ -29,5 +36,13 @@
     "publicUrl": "https://app.example.org",
     "publicMode": "http-success",
     "requireRouting": true
+  },
+  "compatibility": {
+    "manifestApis": [
+      "arcturus.u128.org/v1",
+      "arcturus.u128.org/v2"
+    ],
+    "v1Mode": "routing-mirror",
+    "v1Manifest": ".arcturus/compat-v1.json"
   }
 }

@@ -28,6 +28,19 @@ jobs:
       - name: Verify release commit is on main
         shell: bash
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Run complete blueprint validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tests/check-version-consistency.py
+          ./tests/test-setup.sh
+          ./tests/test-update.sh
+          ./scripts/arcturus-guard
+          bash -n scripts/arcturus-setup scripts/arcturus-update scripts/arcturus-tool scripts/arcturus-ci \
+            scripts/arcturus-oci-publish scripts/arcturus-compat-v1 \
+            scripts/arcturus-lifecycle scripts/arcturus-acceptance scripts/arcturus-host-acceptance \
+            scripts/arcturus-release scripts/arcturus-deploy scripts/arcturus-service scripts/arcturus-guard \
+            examples/ci/generic.sh tests/test-setup.sh tests/test-update.sh
       - name: Create reproducible source archive and bundle
         shell: bash
         run: |

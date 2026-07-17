@@ -17,10 +17,18 @@ python3 -m json.tool "$web/.arcturus/project.json" >/dev/null
 test -f "$web/AGENTS.md"
 (cd "$web" && ./scripts/arcturus-guard)
 grep -q 'arcturus-ci' "$web/.gitea/workflows/deploy.yaml"
+grep -Fq '${{ gitea.sha }}' "$web/.gitea/workflows/deploy.yaml"
+grep -Fq 'uses: https://github.com/actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' "$web/.gitea/workflows/deploy.yaml"
+! grep -Fq '${{ github.sha }}' "$web/.gitea/workflows/deploy.yaml"
+! grep -q '^concurrency:' "$web/.gitea/workflows/deploy.yaml"
 grep -q '^name: Deploy example-web$' "$web/.gitea/workflows/deploy.yaml"
 grep -q '^name: Manage example-web$' "$web/.gitea/workflows/lifecycle.yaml"
 grep -q '^name: Test example-web rollback$' "$web/.gitea/workflows/acceptance.yaml"
 grep -q 'project preflight' "$web/scripts/arcturus-ci"
+test -x "$web/scripts/arcturus-oci-publish"
+test -x "$web/scripts/arcturus-compat-v1"
+test -f "$web/.arcturus/compat-v1.json"
+(cd "$web" && ./scripts/arcturus-compat-v1 check arcturus.release.json .arcturus/compat-v1.json >/dev/null)
 ! grep -R -E 'DEPLOY_WEBHOOK_SECRET|REGISTRY_PASSWORD|/deploy(["[:space:]]|$)' "$web/.gitea/workflows"
 
 cp "$web/arcturus.release.json" "$web/arcturus.release.json.valid"
@@ -168,8 +176,67 @@ if [[ "${ARCTURUS_TEST_HOST_INSTALLER:-false}" == true ]]; then
     --host-home "$workspace/host-home" --base-domain example.org --dry-run >/dev/null
 fi
 
-grep -q '^ARCTURUS_MIN_VERSION=0.99.0-rc.2$' "$web/.arcturus/lock.env"
-grep -q '^ARCTURUS_REQUIRED_FEATURES=authenticated-preflight,legacy-compose-handoff$' "$web/.arcturus/lock.env"
+grep -q '^ARCTURUS_MIN_VERSION=1.0.0-rc.2$' "$web/.arcturus/lock.env"
+grep -q '^ARCTURUS_SUPPORTED_MANIFEST_APIS=arcturus.u128.org/v1,arcturus.u128.org/v2$' "$web/.arcturus/lock.env"
+grep -q 'manifest-v1-safe-routing-mirror' "$web/.arcturus/lock.env"
+grep -q 'manifest-v1-provenance-routing' "$web/.arcturus/lock.env"
 grep -q 'REGISTRY_USER:.*secrets.REGISTRY_USER' "$web/.gitea/workflows/deploy.yaml"
+
+no_v1="$workspace/no-v1"
+"$root/scripts/arcturus-setup" init \
+  --project-dir "$no_v1" --service no-v1 --type worker \
+  --image-repository registry.example.org/team/no-v1 \
+  --bundle "$bundle" --test-command true --ci none \
+  --no-compat-manifest-v1 --non-interactive
+! test -f "$no_v1/.arcturus/compat-v1.json"
+grep -q '^ARCTURUS_SUPPORTED_MANIFEST_APIS=arcturus.u128.org/v2$' "$no_v1/.arcturus/lock.env"
+! grep -q 'manifest-v1-' "$no_v1/.arcturus/lock.env"
+
+owned="$workspace/owned"
+"$root/scripts/arcturus-setup" init \
+  --project-dir "$owned" --service owned-app --type worker \
+  --registry-mode owned --registry-origin https://registry.tailnet.ts.net \
+  --deploy-url https://registry.tailnet.ts.net --ci github \
+  --bundle "$bundle" --test-command true --non-interactive
+python3 - "$owned/.arcturus/project.json" "$owned/arcturus.release.json" <<'PY'
+import json,sys
+project,manifest=(json.load(open(path)) for path in sys.argv[1:])
+assert project['registry']['mode']=='owned'
+assert project['registry']['origin']=='https://registry.tailnet.ts.net'
+assert project['builds']['app']['componentRepositories']['app']=='registry.tailnet.ts.net/owned-app/app'
+assert manifest['spec']['components']['app']['image'].startswith('registry.tailnet.ts.net/owned-app/app@sha256:')
+PY
+grep -Fq '${{ github.sha }}' "$owned/.github/workflows/deploy.yaml"
+grep -Fq 'uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' "$owned/.github/workflows/deploy.yaml"
+! grep -q 'REGISTRY_TOKEN:' "$owned/.github/workflows/deploy.yaml"
+grep -q '^concurrency:' "$owned/.github/workflows/deploy.yaml"
+grep -q 'oci-upload-grants' "$owned/.arcturus/lock.env"
+(cd "$owned" && ./scripts/arcturus-guard)
+
+gitea_owned="$workspace/gitea-owned"
+"$root/scripts/arcturus-setup" init \
+  --project-dir "$gitea_owned" --service gitea-owned --type worker \
+  --registry-mode owned --registry-origin https://registry.tailnet.ts.net \
+  --deploy-url https://registry.tailnet.ts.net --ci gitea \
+  --bundle "$bundle" --test-command true --non-interactive
+grep -Fq '${{ gitea.sha }}' "$gitea_owned/.gitea/workflows/deploy.yaml"
+! grep -Fq '${{ github.sha }}' "$gitea_owned/.gitea/workflows/deploy.yaml"
+! grep -q '^concurrency:' "$gitea_owned/.gitea/workflows/deploy.yaml"
+! grep -q 'REGISTRY_TOKEN:' "$gitea_owned/.gitea/workflows/deploy.yaml"
+grep -q 'oci-upload-grants' "$gitea_owned/.arcturus/lock.env"
+(cd "$gitea_owned" && ./scripts/arcturus-guard)
+
+github_external="$workspace/github-external"
+"$root/scripts/arcturus-setup" init \
+  --project-dir "$github_external" --service github-external --type worker \
+  --image-repository ghcr.io/example/github-external \
+  --deploy-url https://arcturus.tailnet.ts.net --ci github \
+  --bundle "$bundle" --test-command true --non-interactive
+grep -Fq '${{ github.sha }}' "$github_external/.github/workflows/deploy.yaml"
+! grep -Fq '${{ gitea.sha }}' "$github_external/.github/workflows/deploy.yaml"
+grep -q '^concurrency:' "$github_external/.github/workflows/deploy.yaml"
+grep -q 'REGISTRY_TOKEN:.*secrets.REGISTRY_TOKEN' "$github_external/.github/workflows/deploy.yaml"
+! grep -q 'oci-upload-grants' "$github_external/.arcturus/lock.env"
+(cd "$github_external" && ./scripts/arcturus-guard)
 
 echo "Blueprint setup tests passed."

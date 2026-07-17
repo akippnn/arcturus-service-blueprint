@@ -1,0 +1,39 @@
+{
+  "apiVersion": "arcturus.u128.org/v1",
+  "kind": "Stack",
+  "metadata": {
+    "annotations": {
+      "arcturus.u128.org/compatibility-source": "v2",
+      "arcturus.u128.org/revision": "0000000000000000000000000000000000000000"
+    },
+    "name": "my-app",
+    "namespace": "default"
+  },
+  "spec": {
+    "deploy": {
+      "autoUpdate": false,
+      "managed": true,
+      "strategy": "quadlet"
+    },
+    "network": {
+      "external": [
+        "internal_routing"
+      ],
+      "isolate": false
+    },
+    "services": {
+      "web": {
+        "aliases": [],
+        "containerName": "my-app",
+        "domains": [
+          "app.example.org"
+        ],
+        "maxBodySize": "1G",
+        "port": 8080,
+        "protocol": "http",
+        "type": "proxy",
+        "websocket": false
+      }
+    }
+  }
+}

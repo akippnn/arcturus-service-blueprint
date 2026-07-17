@@ -1,4 +1,6 @@
-# Select with: scripts/arcturus-setup init ... --ci github
+# External-registry example. Generate it with --ci github --registry-mode external.
+# Owned mode omits REGISTRY_USER/REGISTRY_TOKEN and keeps a project-owned
+# Tailscale join step before scripts/arcturus-ci.
 name: Deploy example-service
 on:
   push:
@@ -6,8 +8,6 @@ on:
 concurrency:
   group: arcturus-example-service
   cancel-in-progress: false
-env:
-  ARCTURUS_REGISTRY_HOST: registry.example.org
 jobs:
   deploy:
     name: Build, deploy, and verify

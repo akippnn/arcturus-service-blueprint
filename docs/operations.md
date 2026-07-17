@@ -1,5 +1,11 @@
 # Operations and troubleshooting
 
+## CI provider and private-network bootstrap
+
+`scripts/arcturus-ci` is identical on Gitea Actions and GitHub Actions. Generated workflows pass the provider-specific full commit SHA, while the Arcturus host-side service lock serializes deployments.
+
+External registry mode needs no new network bootstrap beyond access to the Arcturus API and the selected registry. For Gitea Packages, store a scoped package-write PAT or deploy credential as `REGISTRY_TOKEN`; do not depend on `GITEA_TOKEN` for OCI publishing. Owned registry mode additionally requires the runner to reach the private Tailscale HTTPS origin before the script starts. Preserve an existing GitHub Tailscale action, add an equivalent project-owned step to Gitea, or run a tailnet-resident self-hosted runner. Do not place reusable Tailscale auth keys in repository files or generated project metadata.
+
 ## Deployment API credential
 
 `ARCTURUS_DEPLOY_TOKEN` is generated on the Arcturus host, not obtained from Gitea, GitHub, Cloudflare, or another API provider:
@@ -46,7 +52,7 @@ Scheduled work is represented by `arcturus-<service>-<component>.timer`; inspect
 - **CI appeared green despite failure:** require both a non-error HTTP result and JSON `status == succeeded`. The generated CLI enforces both.
 - **CI test command not found:** runners need Bash and Buildah, not the application toolchain. Put tests in a declared Containerfile validation target. The generic driver builds validation targets before release targets and stops before push on failure.
 - **Buildah storage collision or disk growth:** verify `ARCTURUS_BUILDAH_ROOT`, `ARCTURUS_BUILDAH_RUNROOT`, `REGISTRY_AUTH_FILE`, and token files are beneath `.arcturus/build/<run>`. Cleanup may remove only that job-local root; never run a shared/global prune from CI.
-- **Python/Node host incompatibility:** the control-plane installer requires Python 3.12+, Node 22+, Podman 5.8+, systemd 257+, and the Quadlet generator. Use `install-host.sh --validate-only`; do not redirect units to NVM or a source checkout.
+- **Python/Node host incompatibility:** the control-plane installer requires Python 3.12+, Node 22+, Podman 5.8+, systemd 252+, and the Quadlet generator. AlmaLinux 10.2 and AlmaLinux 9.8 are supported host baselines. Use `install-host.sh --validate-only`; do not redirect units to NVM or a source checkout.
 - **Public route missing or deployment times out:** inspect `router-status.json`, registry `/rescan`, registry/router journals, `generated-<service>.conf`, and `podman exec <portal-nginx> nginx -t`. Success requires a receipt whose revision matches the release, with domains, upstreams, configuration digest, and application time. Nginx validation/reload failure is a deployment failure and should restore the previous receipt.
 - **Cloudflare returns a challenge:** for protected sites this is expected only when `.arcturus/project.json` uses `publicMode: cloudflare-challenge`. The verifier checks the challenge marker; it does not weaken or bypass Cloudflare policy. Use an authorized browser for application-level acceptance.
 - **Rootless sockets disappear after reboot:** verify lingering, `%t/arcturus`, the bus/registry sockets, and service ordering. The host acceptance check should list declared critical units individually.

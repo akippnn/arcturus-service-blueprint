@@ -1,34 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-revision="${1:-${GITHUB_SHA:-${CI_COMMIT_SHA:-}}}"
-[[ "$revision" =~ ^[0-9a-f]{40}$ ]] || {
+revision="${1:-${GITHUB_SHA:-${GITEA_SHA:-${CI_COMMIT_SHA:-}}}}"
+[[ "$revision" =~ ^[0-9a-fA-F]{40}$ ]] || {
   echo "Arcturus CI requires the full 40-character commit SHA." >&2
   exit 2
 }
-for variable in REGISTRY_TOKEN ARCTURUS_DEPLOY_TOKEN; do
-  [[ -n "${!variable:-}" ]] || { echo "Required CI secret $variable is missing." >&2; exit 2; }
+revision="${revision,,}"
+: "${ARCTURUS_DEPLOY_TOKEN:?ARCTURUS_DEPLOY_TOKEN is required}"
+for command in buildah python3; do
+  command -v "$command" >/dev/null 2>&1 || { echo "$command is required." >&2; exit 2; }
 done
-registry_user="${REGISTRY_USER:-${GITHUB_ACTOR:-${GITEA_ACTOR:-}}}"
-[[ -n "$registry_user" ]] || {
-  echo "Registry username is missing; set REGISTRY_USER or use a runner that exports GITHUB_ACTOR/GITEA_ACTOR." >&2
-  exit 2
-}
-command -v buildah >/dev/null 2>&1 || {
-  echo "Buildah is required; application language toolchains are not required on the runner." >&2
-  exit 2
-}
-command -v python3 >/dev/null 2>&1 || {
-  echo "Python 3 is required to enforce the pre-push image-size policy." >&2
-  exit 2
-}
-max_image_size_bytes="${ARCTURUS_MAX_IMAGE_SIZE_BYTES:-805306368}"
-[[ "$max_image_size_bytes" =~ ^[1-9][0-9]*$ ]] || {
-  echo "ARCTURUS_MAX_IMAGE_SIZE_BYTES must be a positive integer." >&2
-  exit 2
-}
 
-run_id="${GITHUB_RUN_ID:-${CI_RUN_NUMBER:-$$}}-${GITHUB_RUN_ATTEMPT:-1}"
+readarray -t project_fields < <(python3 - <<'PY'
+import json
+with open('.arcturus/project.json', encoding='utf-8') as handle:
+    project = json.load(handle)
+registry = project['registry']
+compat = project.get('compatibility', {})
+print(project['service'])
+print(registry.get('mode', 'external'))
+print(registry['host'])
+print(registry.get('origin') or '')
+print(compat.get('v1Mode', 'disabled'))
+print(compat.get('v1Manifest', '.arcturus/compat-v1.json'))
+PY
+)
+service="${project_fields[0]}"
+registry_mode="${project_fields[1]}"
+registry_host="${project_fields[2]}"
+registry_origin="${project_fields[3]}"
+v1_mode="${project_fields[4]}"
+v1_manifest="${project_fields[5]}"
+[[ "$registry_mode" == external || "$registry_mode" == owned ]] || { echo "Invalid registry mode." >&2; exit 2; }
+if [[ "$registry_mode" == external ]]; then
+  : "${REGISTRY_TOKEN:?REGISTRY_TOKEN is required for external registry mode}"
+  registry_user="${REGISTRY_USER:-${GITHUB_ACTOR:-${GITEA_ACTOR:-${CI_ACTOR:-}}}}"
+  [[ -n "$registry_user" ]] || { echo "REGISTRY_USER or provider actor is required for external registry mode." >&2; exit 2; }
+else
+  [[ "$registry_origin" =~ ^https:// ]] || { echo "Owned registry mode requires a private HTTPS registry origin." >&2; exit 2; }
+fi
+
+max_image_size_bytes="${ARCTURUS_MAX_IMAGE_SIZE_BYTES:-805306368}"
+[[ "$max_image_size_bytes" =~ ^[1-9][0-9]*$ ]] || { echo "ARCTURUS_MAX_IMAGE_SIZE_BYTES must be positive." >&2; exit 2; }
+run_id="${GITHUB_RUN_ID:-${GITEA_RUN_NUMBER:-${CI_RUN_NUMBER:-$$}}}-${GITHUB_RUN_ATTEMPT:-${GITEA_RUN_ATTEMPT:-1}}"
 work_rel=".arcturus/build/$run_id"
 work="$PWD/$work_rel"
 graph="$work/storage"
@@ -45,130 +60,141 @@ export ARCTURUS_TOKEN_FILE="$token_file"
 export REGISTRY_AUTH_FILE="$authfile"
 export ARCTURUS_BUILDAH_ROOT="$graph"
 export ARCTURUS_BUILDAH_RUNROOT="$runroot"
+buildah_cmd=(buildah --root "$graph" --runroot "$runroot")
 cleanup() {
-  buildah --root "$graph" --runroot "$runroot" rm --all >/dev/null 2>&1 || true
-  buildah unshare rm -rf "$work" >/dev/null 2>&1 || rm -rf "$work" || true
+  "${buildah_cmd[@]}" rm --all >/dev/null 2>&1 || true
+  "${buildah_cmd[@]}" unshare rm -rf "$work" >/dev/null 2>&1 || rm -rf "$work" || true
 }
 trap cleanup EXIT INT TERM
 
 image_size_bytes() {
-  local image="$1"
-  buildah --root "$graph" --runroot "$runroot" images --json "$image" |
-    python3 -c '
-import json
-import sys
-rows = json.load(sys.stdin)
-if len(rows) != 1:
-    raise SystemExit(f"expected one local image for {sys.argv[1]}, found {len(rows)}")
-row = rows[0]
-size = row.get("size", row.get("Size"))
-if not isinstance(size, int) or size < 0:
-    raise SystemExit(f"local image size is unavailable for {sys.argv[1]}")
+  "${buildah_cmd[@]}" images --json "$1" | python3 -c '
+import json, sys
+rows=json.load(sys.stdin)
+if len(rows)!=1: raise SystemExit("expected exactly one local image")
+size=rows[0].get("size", rows[0].get("Size"))
+if not isinstance(size,int) or size<0: raise SystemExit("local image size unavailable")
 print(size)
-' "$image"
+'
 }
 
 enforce_remote_image_policy() {
-  local image="$1"
-  local size_bytes="$2"
+  local image="$1" size_bytes="$2"
   python3 - "$image" "$size_bytes" "$token_file" <<'PY'
-import json
-import os
-import sys
-import urllib.error
-import urllib.request
-
-image, size_raw, token_path = sys.argv[1:]
-with open(".arcturus/project.json", encoding="utf-8") as handle:
-    project = json.load(handle)
-service = project["service"]
-api_url = os.environ.get("ARCTURUS_API_URL") or project["ci"]["apiUrl"]
-payload = json.dumps(
-    {"service": service, "image": image, "size_bytes": int(size_raw)},
-    separators=(",", ":"),
-).encode()
-with open(token_path, encoding="utf-8") as handle:
-    token = handle.read().strip()
-request = urllib.request.Request(
-    api_url.rstrip("/") + "/v1/image-policy",
-    data=payload,
-    method="POST",
-    headers={
-        "Authorization": "Bearer " + token,
-        "Content-Type": "application/json",
-    },
-)
+import json, os, sys, urllib.error, urllib.request
+image,size_raw,token_path=sys.argv[1:]
+project=json.load(open('.arcturus/project.json', encoding='utf-8'))
+payload=json.dumps({'service':project['service'],'image':image,'size_bytes':int(size_raw)},separators=(',',':')).encode()
+token=open(token_path, encoding='utf-8').read().strip()
+request=urllib.request.Request((os.environ.get('ARCTURUS_API_URL') or project['ci']['apiUrl']).rstrip('/')+'/v1/image-policy',data=payload,method='POST',headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
 try:
     with urllib.request.urlopen(request, timeout=20) as response:
-        body = response.read().decode("utf-8", "replace")
-        if response.status != 200:
-            raise SystemExit(f"Arcturus image policy returned HTTP {response.status}: {body}")
+        if response.status != 200: raise SystemExit(f'image policy returned HTTP {response.status}')
 except urllib.error.HTTPError as exc:
-    body = exc.read().decode("utf-8", "replace")
     if exc.code == 404:
-        print(
-            "Arcturus host does not yet advertise image-size-policy; "
-            "the local pre-push limit remains enforced.",
-            file=sys.stderr,
-        )
-        raise SystemExit(0)
-    print(f"Arcturus image policy rejected the release (HTTP {exc.code}): {body}", file=sys.stderr)
-    raise SystemExit(3 if exc.code == 413 else 2)
+        print('Host lacks remote image-size-policy; local limit remains enforced.', file=sys.stderr)
+    else:
+        print(f'Arcturus image policy rejected the release (HTTP {exc.code}): '+exc.read().decode('utf-8','replace'), file=sys.stderr)
+        raise SystemExit(3 if exc.code == 413 else 2)
 except urllib.error.URLError as exc:
-    print(f"Arcturus image policy could not be reached: {exc}", file=sys.stderr)
-    raise SystemExit(2)
+    raise SystemExit(f'Arcturus image policy could not be reached: {exc}')
 PY
 }
 
-printf '%s' "$REGISTRY_TOKEN" | buildah --root "$graph" --runroot "$runroot" \
-  login --authfile "$authfile" --username "$registry_user" --password-stdin \
-  "${ARCTURUS_REGISTRY_HOST:?ARCTURUS_REGISTRY_HOST is required}"
-unset REGISTRY_TOKEN
-./scripts/arcturus-tool project preflight .arcturus/project.json --token-file "$token_file"
+./scripts/arcturus-tool project preflight .arcturus/project.json --readiness-only --token-file "$token_file"
 ./scripts/arcturus-tool project validate .arcturus/project.json
 export ARCTURUS_PROJECT_VALIDATED=1
 ./scripts/arcturus-guard
 ./scripts/arcturus-tool project plan .arcturus/project.json --format tsv >"$plan"
 
+if [[ "$registry_mode" == external ]]; then
+  printf '%s' "$REGISTRY_TOKEN" | "${buildah_cmd[@]}" login --authfile "$authfile" \
+    --username "$registry_user" --password-stdin "$registry_host" >/dev/null
+  unset REGISTRY_TOKEN
+fi
+
+declare -a owned_mappings=()
 digest_args=()
-while IFS=$'\t' read -r name repository context containerfile validations release_target components; do
-  [[ -n "$name" && -n "$repository" && -n "$components" ]] || {
-    echo "Invalid build plan row for '$name'." >&2
-    exit 2
-  }
+while IFS=$'\t' read -r name repository context containerfile validations release_target components component_repositories; do
+  [[ -n "$name" && -n "$repository" && -n "$components" && -n "$component_repositories" ]] || { echo "Invalid build plan row for '$name'." >&2; exit 2; }
   if [[ "$validations" != "-" ]]; then
     IFS=',' read -r -a targets <<<"$validations"
     for target in "${targets[@]}"; do
-      buildah --root "$graph" --runroot "$runroot" bud --authfile "$authfile" \
-        --file "$containerfile" --target "$target" \
+      "${buildah_cmd[@]}" bud --authfile "$authfile" --file "$containerfile" --target "$target" \
+        --label "org.opencontainers.image.revision=$revision" \
         --tag "$repository:validation-$revision-$target" "$context"
     done
   fi
-  target_args=()
-  [[ "$release_target" == "-" ]] || target_args=(--target "$release_target")
-  image="$repository:$revision"
-  buildah --root "$graph" --runroot "$runroot" bud --authfile "$authfile" \
-    --file "$containerfile" "${target_args[@]}" --tag "$image" "$context"
-  size_bytes="$(image_size_bytes "$image")"
-  printf 'Built %s: %s bytes; local pre-push limit: %s bytes\n' \
-    "$image" "$size_bytes" "$max_image_size_bytes"
-  if (( size_bytes > max_image_size_bytes )); then
-    echo "Refusing to upload oversized image $image ($size_bytes bytes > $max_image_size_bytes bytes)." >&2
-    exit 3
+  target_args=(); [[ "$release_target" == "-" ]] || target_args=(--target "$release_target")
+  local_image="$repository:$revision"
+  "${buildah_cmd[@]}" bud --authfile "$authfile" --file "$containerfile" "${target_args[@]}" \
+    --label "org.opencontainers.image.revision=$revision" --tag "$local_image" "$context"
+  size_bytes="$(image_size_bytes "$local_image")"
+  (( size_bytes <= max_image_size_bytes )) || { echo "Refusing oversized image $local_image." >&2; exit 3; }
+
+  component_rows="$(python3 - "$components" "$component_repositories" "$repository" <<'PY'
+import json,sys
+components=sys.argv[1].split(',')
+mapping=json.loads(sys.argv[2])
+default=sys.argv[3]
+for component in components:
+    print(component+'\t'+mapping.get(component,default))
+PY
+)"
+  if [[ "$registry_mode" == owned ]]; then
+    while IFS=$'\t' read -r component target_repository; do
+      enforce_remote_image_policy "$target_repository:$revision" "$size_bytes"
+      owned_mappings+=("$component=$local_image")
+    done <<<"$component_rows"
+  else
+    digest_file="$work_rel/$name.digest"
+    first_digest=""
+    declare -A pushed_repositories=()
+    while IFS=$'\t' read -r component target_repository; do
+      enforce_remote_image_policy "$target_repository:$revision" "$size_bytes"
+      [[ -z "${pushed_repositories[$target_repository]:-}" ]] || continue
+      pushed_repositories[$target_repository]=1
+      component_digest="$work/$name-$component.digest"
+      "${buildah_cmd[@]}" push --authfile "$authfile" --digestfile "$component_digest" \
+        "$local_image" "docker://$target_repository:$revision"
+      value="$(tr -d '[:space:]' <"$component_digest")"
+      [[ "$value" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Invalid digest for $component." >&2; exit 1; }
+      [[ -z "$first_digest" || "$first_digest" == "$value" ]] || { echo "Shared build produced inconsistent digests." >&2; exit 1; }
+      first_digest="$value"
+    done <<<"$component_rows"
+    printf '%s\n' "$first_digest" >"$digest_file"
+    digest_args+=(--digest "$name=$digest_file")
   fi
-  enforce_remote_image_policy "$image" "$size_bytes"
-  digest_file="$work_rel/$name.digest"
-  buildah --root "$graph" --runroot "$runroot" push --authfile "$authfile" \
-    --digestfile "$digest_file" "$image" "docker://$image"
-  digest_args+=(--digest "$name=$digest_file")
 done <"$plan"
+
+if [[ "$registry_mode" == owned ]]; then
+  export ARCTURUS_URL="$registry_origin"
+  export ARCTURUS_CONTROL_TOKEN="$(cat "$token_file")"
+  export ARCTURUS_OCI_DIGEST_DIR="$work/owned-digests"
+  export ARCTURUS_OCI_RECEIPT_FILE="$work/artifact-receipts.json"
+  ./scripts/arcturus-oci-publish "$service" "$revision" "${owned_mappings[@]}" >"$work/artifact-completion.json"
+  unset ARCTURUS_CONTROL_TOKEN
+  while IFS=$'\t' read -r name _repository _context _containerfile _validations _release_target components _component_repositories; do
+    first=""
+    IFS=',' read -r -a component_names <<<"$components"
+    for component in "${component_names[@]}"; do
+      value="$(tr -d '[:space:]' <"$work/owned-digests/$component.digest")"
+      [[ -z "$first" || "$first" == "$value" ]] || { echo "Owned receipts for build $name have inconsistent digests." >&2; exit 1; }
+      first="$value"
+    done
+    digest_file="$work_rel/$name.digest"
+    printf '%s\n' "$first" >"$digest_file"
+    digest_args+=(--digest "$name=$digest_file")
+  done <"$plan"
+fi
 
 ./scripts/arcturus-tool project render .arcturus/project.json --revision "$revision" \
   "${digest_args[@]}" --output release.json --request-output deployment-request.json
-./scripts/arcturus-tool project deploy .arcturus/project.json --request deployment-request.json \
-  --token-file "$token_file"
-./scripts/arcturus-tool project verify .arcturus/project.json --release release.json \
-  --token-file "$token_file"
-if [[ "${2:-}" == "--acceptance" ]]; then
-  ./scripts/arcturus-acceptance
+if [[ "$v1_mode" == routing-mirror ]]; then
+  ./scripts/arcturus-compat-v1 render release.json "$v1_manifest"
+  ./scripts/arcturus-compat-v1 check release.json "$v1_manifest"
 fi
+./scripts/arcturus-tool project preflight .arcturus/project.json --release release.json --token-file "$token_file"
+./scripts/arcturus-tool project deploy .arcturus/project.json --request deployment-request.json --token-file "$token_file"
+./scripts/arcturus-tool project verify .arcturus/project.json --release release.json --token-file "$token_file"
+if [[ "${2:-}" == "--acceptance" ]]; then ./scripts/arcturus-acceptance; fi

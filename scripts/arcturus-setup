@@ -13,6 +13,10 @@ Project options:
   --project-spec FILE          Declarative multi-component project graph JSON
   --type web|worker|scheduled|oneshot
   --image-repository REPO      Registry repository without tag
+  --registry-mode MODE         external|owned (default: external)
+  --registry-origin URL        Private HTTPS Arcturus OCI origin for owned mode
+  --compat-manifest-v1         Generate a strict v1 routing mirror from v2 (default)
+  --no-compat-manifest-v1      Do not generate the optional v1 routing mirror
   --containerfile PATH         Repository-relative Containerfile/Dockerfile
   --validation-target TARGETS Comma-separated test stages (default: test)
   --release-target TARGET      Production stage (default: runtime; '-' for final)
@@ -63,6 +67,9 @@ COMPONENT="${ARCTURUS_COMPONENT:-app}"
 PROJECT_SPEC="${ARCTURUS_PROJECT_SPEC:-}"
 SERVICE_TYPE="${ARCTURUS_SERVICE_TYPE:-web}"
 IMAGE_REPOSITORY="${ARCTURUS_IMAGE_REPOSITORY:-}"
+REGISTRY_MODE="${ARCTURUS_REGISTRY_MODE:-external}"
+REGISTRY_ORIGIN="${ARCTURUS_REGISTRY_ORIGIN:-}"
+COMPAT_MANIFEST_V1="${ARCTURUS_COMPAT_MANIFEST_V1:-true}"
 CONTAINERFILE="${ARCTURUS_CONTAINERFILE:-}"
 VALIDATION_TARGETS="${ARCTURUS_VALIDATION_TARGETS:-test}"
 RELEASE_TARGET="${ARCTURUS_RELEASE_TARGET:-runtime}"
@@ -108,6 +115,10 @@ while (($#)); do
     --project-spec) PROJECT_SPEC="$2"; CLI_SET[project_spec]=1; shift 2 ;;
     --type) SERVICE_TYPE="$2"; CLI_SET[type]=1; shift 2 ;;
     --image-repository) IMAGE_REPOSITORY="$2"; CLI_SET[image]=1; shift 2 ;;
+    --registry-mode) REGISTRY_MODE="$2"; CLI_SET[registry_mode]=1; shift 2 ;;
+    --registry-origin) REGISTRY_ORIGIN="$2"; CLI_SET[registry_origin]=1; shift 2 ;;
+    --compat-manifest-v1) COMPAT_MANIFEST_V1=true; CLI_SET[compat_v1]=1; shift ;;
+    --no-compat-manifest-v1) COMPAT_MANIFEST_V1=false; CLI_SET[compat_v1]=1; shift ;;
     --containerfile) CONTAINERFILE="$2"; shift 2 ;;
     --validation-target) VALIDATION_TARGETS="$2"; shift 2 ;;
     --release-target) RELEASE_TARGET="$2"; shift 2 ;;
@@ -160,6 +171,9 @@ read_config() {
       ARCTURUS_PROJECT_SPEC) [[ -z "${ARCTURUS_PROJECT_SPEC+x}" && -z "${CLI_SET[project_spec]:-}" ]] && PROJECT_SPEC="$value" ;;
       ARCTURUS_SERVICE_TYPE) [[ -z "${ARCTURUS_SERVICE_TYPE+x}" && -z "${CLI_SET[type]:-}" ]] && SERVICE_TYPE="$value" ;;
       ARCTURUS_IMAGE_REPOSITORY) [[ -z "$IMAGE_REPOSITORY" ]] && IMAGE_REPOSITORY="$value" ;;
+      ARCTURUS_REGISTRY_MODE) [[ -z "${CLI_SET[registry_mode]:-}" ]] && REGISTRY_MODE="$value" ;;
+      ARCTURUS_REGISTRY_ORIGIN) [[ -z "${CLI_SET[registry_origin]:-}" ]] && REGISTRY_ORIGIN="$value" ;;
+      ARCTURUS_COMPAT_MANIFEST_V1) [[ -z "${CLI_SET[compat_v1]:-}" ]] && COMPAT_MANIFEST_V1="$value" ;;
       ARCTURUS_CONTAINERFILE) [[ -z "$CONTAINERFILE" ]] && CONTAINERFILE="$value" ;;
       ARCTURUS_VALIDATION_TARGETS) VALIDATION_TARGETS="$value" ;;
       ARCTURUS_RELEASE_TARGET) RELEASE_TARGET="$value" ;;
@@ -207,12 +221,15 @@ fi
 if [[ -z "$SERVICE" ]]; then
   SERVICE="$(basename "$PROJECT_DIR" | tr '[:upper:]_' '[:lower:]-')"
 fi
-if [[ -z "$IMAGE_REPOSITORY" ]] && git -C "$PROJECT_DIR" remote get-url origin >/dev/null 2>&1; then
+if [[ "$REGISTRY_MODE" == external && -z "$IMAGE_REPOSITORY" ]] && git -C "$PROJECT_DIR" remote get-url origin >/dev/null 2>&1; then
   remote="$(git -C "$PROJECT_DIR" remote get-url origin)"
   remote="${remote#*://}"
   remote="${remote#*@}"
   remote="${remote/:/\/}"
   IMAGE_REPOSITORY="${remote%.git}"
+fi
+if [[ "$REGISTRY_MODE" == owned && -z "$IMAGE_REPOSITORY" && "$REGISTRY_ORIGIN" =~ ^https:// ]]; then
+  IMAGE_REPOSITORY="${REGISTRY_ORIGIN#https://}/$SERVICE/$COMPONENT"
 fi
 if [[ -z "$CONTAINERFILE" ]]; then
   if [[ -f "$PROJECT_DIR/Containerfile" ]]; then CONTAINERFILE=Containerfile
@@ -268,6 +285,11 @@ if [[ "$MODE" != host ]]; then
   [[ "$TLS_MODE" =~ ^(portal|external|none)$ ]] || errors+=("tls mode must be portal, external, or none")
   [[ "$RESTART" =~ ^(always|on-failure|no)$ ]] || errors+=("invalid restart policy")
   [[ "$CI_PROVIDER" =~ ^(gitea|github|generic|none)$ ]] || errors+=("invalid CI provider")
+  [[ "$REGISTRY_MODE" =~ ^(external|owned)$ ]] || errors+=("registry mode must be external or owned")
+  [[ "$COMPAT_MANIFEST_V1" =~ ^(true|false)$ ]] || errors+=("ARCTURUS_COMPAT_MANIFEST_V1 must be true or false")
+  if [[ "$REGISTRY_MODE" == owned ]]; then
+    [[ "$REGISTRY_ORIGIN" =~ ^https://[a-z0-9][a-z0-9.-]*(:[0-9]+)?$ ]] || errors+=("owned registry mode requires a lowercase HTTPS origin without a path")
+  fi
   [[ "$PUBLIC_VERIFICATION" =~ ^(http-success|cloudflare-challenge|skip)$ ]] || errors+=("invalid public verification mode")
   [[ -n "$DEPLOY_URL" ]] || errors+=("deploy URL is required for Gitea/GitHub CI")
   [[ -z "$DEPLOY_URL" || "$DEPLOY_URL" =~ ^https?://[^[:space:]]+$ ]] || errors+=("deploy URL must be an http(s) URL without whitespace")
@@ -307,27 +329,54 @@ if [[ "$MODE" =~ ^(init|all)$ ]]; then
   cat >"$work/AGENTS.md" <<EOF
 # Arcturus deployment contract for automation and LLM agents
 
-Production service **$SERVICE** has one release owner: the Arcturus v2 deployer.
-Read project-owned \`.arcturus/project.json\` and sole manifest
-\`arcturus.release.json\` before changing builds, deployment, routing, or secrets.
+Production service **$SERVICE** has one authoritative lifecycle owner: the Arcturus
+manifest-v2 deployer. Read \`.arcturus/project.json\` and \`arcturus.release.json\`
+before changing builds, deployment, routing, lifecycle, or secrets.
 
-Run \`scripts/arcturus-guard\`, then \`scripts/arcturus-ci <full-commit>\`. CI uses
-isolated Buildah storage, builds declared validation targets before release targets,
-pushes full-commit tags, resolves digests, maps shared images once, renders every
-component as \`repository@sha256:digest\`, deploys through \`arcturusctl\`, and
-verifies active commit/images/health plus the matching router receipt.
+The CI provider may be Gitea, GitHub, or a generic runner. Provider workflows only
+supply a full 40-character revision and secrets; \`scripts/arcturus-ci\` owns the
+provider-neutral build and deployment behavior. Do not treat workflow concurrency as
+a safety boundary: Arcturus's host-side per-service lock is authoritative. In owned
+registry mode the runner must join or already reside on the tailnet before this script
+runs. Keep project-owned Tailscale bootstrap in the workflow; never place reusable
+auth keys, tags, or ACL policy in generated repository files.
 
-Every routed component joins \`internal_routing\`; route ports are container ports.
-Nginx is generated from the active manifest. Never create a manual portal vhost.
-Use \`scripts/arcturus-lifecycle\` for lifecycle operations and the manual acceptance
-workflow for the expected-502 rollback probe. CI never starts backups or reboots.
+Registry modes:
 
-Never use legacy \`/deploy\`, direct deployment curl, \`latest\`, Watchtower,
-production Compose, Terraform release resources, shared runner pruning, obsolete
-secret names, embedded Git credentials, or secret-like manifest environment values.
-If the runner lacks the application toolchain, tests belong in a declared
-Containerfile validation target. Preserve project-owned files; review generator
-proposals under \`.arcturus/updates/\`.
+- \`external\`: use the configured long-lived external-registry credentials, push
+  full-revision tags, resolve digests, and deploy immutable manifest-v2 images. For
+  Gitea Packages, use a scoped package-write PAT or deploy credential rather than
+  assuming the workflow \`GITEA_TOKEN\` can publish OCI packages.
+- \`owned\`: after private network reachability is established, request a short-lived
+  Arcturus upload grant, push through Tailscale HTTPS, complete verification, obtain
+  immutable receipts, then deploy the
+  same manifest-v2 contract. One local build may map to multiple components; the
+  publisher automatically pushes it to each \`<service>/<component>\` repository
+  required by receipt isolation without rebuilding the image.
+
+Manifest v2 remains the only deployment, activation, rollback, and recovery contract
+for projects generated by this blueprint. When manifest-v1 compatibility is enabled,
+\`.arcturus/compat-v1.json\` is generated strictly from the rendered v2 release and is
+a compatibility export for older routing consumers only. Current v2 activation routes
+directly from accepted v2 state. Never maintain that generated export independently. Existing
+native manifest-v1 installations remain supported by the Arcturus host. The trusted
+registry strips authored provenance claims, assigns a canonical manifest digest and
+content-derived revision, and the router recomputes both before accepting the route;
+bootstrap them incrementally rather than overwriting project-owned v1 files. The deprecated legacy \`/deploy\` endpoint is
+reserved for hosts that have not yet bootstrapped v2 lifecycle ownership; it requires
+a service-scoped token and full immutable Git SHA and is not a substitute for v2
+receipts and rollback.
+
+Run \`scripts/arcturus-guard\`, then \`scripts/arcturus-ci <full-commit>\`. Build every
+declared validation target before its release target in isolated job-local Buildah
+storage. Treat success as exact active revision + exact digest-pinned images + healthy
+units + matching router receipt. Every routed component joins \`internal_routing\`.
+
+Forbidden: mutable tags, production Compose, Watchtower, Terraform application-release
+ownership, direct deployment curl, shared runner pruning, embedded credentials,
+secret-like manifest environment values, manually edited generated nginx, or an
+independently authored replacement for a blueprint-generated v1 routing mirror.
+Preserve project-owned files and review staged blueprint proposals beneath \`.arcturus/updates/\`.
 EOF
 
   SETUP_SERVICE_TYPE="$SERVICE_TYPE" SETUP_IMAGE="$IMAGE_REPOSITORY" \
@@ -336,6 +385,7 @@ EOF
   SETUP_PORT="$PORT" SETUP_HEALTH_PATH="$HEALTH_PATH" \
   SETUP_HEALTH_COMMAND="$HEALTH_COMMAND" SETUP_SCHEDULE="$SCHEDULE" \
   SETUP_EXPOSURE="$EXPOSURE" SETUP_DOMAIN="$DOMAIN" SETUP_PROJECT_SPEC="$PROJECT_SPEC" \
+  SETUP_REGISTRY_MODE="$REGISTRY_MODE" SETUP_REGISTRY_ORIGIN="$REGISTRY_ORIGIN" \
   python3 - "$work/arcturus.release.json" <<'PY'
 import json, os, sys
 spec_path = os.environ["SETUP_PROJECT_SPEC"]
@@ -356,6 +406,16 @@ if spec_path:
         manifest["spec"]["migration"] = source["migration"]
     if not manifest["spec"]["components"]:
         raise SystemExit("project spec requires at least one component")
+    if os.environ["SETUP_REGISTRY_MODE"] == "owned":
+        host = os.environ["SETUP_REGISTRY_ORIGIN"].removeprefix("https://")
+        service = os.environ["SETUP_SERVICE"]
+        for build in source.get("builds", {}).values():
+            for component_name in build.get("components", []):
+                if component_name not in manifest["spec"]["components"]:
+                    raise SystemExit(f"build maps missing component {component_name}")
+                manifest["spec"]["components"][component_name]["image"] = (
+                    f"{host}/{service}/{component_name}@sha256:" + "0" * 64
+                )
     with open(sys.argv[1], "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2)
         handle.write("\n")
@@ -396,13 +456,18 @@ with open(sys.argv[1], "w") as handle:
     handle.write("\n")
 PY
 
+  if [[ "$COMPAT_MANIFEST_V1" == true ]]; then
+    "$BLUEPRINT_ROOT/scripts/arcturus-compat-v1" render       "$work/arcturus.release.json" "$work/.arcturus/compat-v1.json" >/dev/null
+  fi
+
   SETUP_SERVICE="$SERVICE" SETUP_COMPONENT="$COMPONENT" SETUP_IMAGE="$IMAGE_REPOSITORY" \
   SETUP_CONTAINERFILE="$CONTAINERFILE" SETUP_VALIDATION_TARGETS="$VALIDATION_TARGETS" \
   SETUP_RELEASE_TARGET="$RELEASE_TARGET" \
   SETUP_DEPLOY_URL="$DEPLOY_URL" SETUP_CI="$CI_PROVIDER" \
   SETUP_EXPOSURE="$EXPOSURE" SETUP_DOMAIN="$DOMAIN" \
   SETUP_PUBLIC_VERIFICATION="$PUBLIC_VERIFICATION" SETUP_PROJECT_SPEC="$PROJECT_SPEC" \
-  SETUP_ALLOW_NO_TESTS="$ALLOW_NO_TESTS" \
+  SETUP_ALLOW_NO_TESTS="$ALLOW_NO_TESTS" SETUP_REGISTRY_MODE="$REGISTRY_MODE" \
+  SETUP_REGISTRY_ORIGIN="$REGISTRY_ORIGIN" SETUP_COMPAT_V1="$COMPAT_MANIFEST_V1" \
   python3 - "$work/.arcturus/project.json" <<'PY'
 import json, os, sys
 
@@ -415,6 +480,28 @@ if spec_path:
         source = json.load(handle)
     if source.get("apiVersion") != "arcturus.u128.org/project-spec/v1":
         raise SystemExit("project spec must use arcturus.u128.org/project-spec/v1")
+registry_mode = os.environ["SETUP_REGISTRY_MODE"]
+registry_origin = os.environ["SETUP_REGISTRY_ORIGIN"] or None
+registry_host = (registry_origin.removeprefix("https://") if registry_origin else image.split("/", 1)[0])
+builds = source.get("builds", {
+    os.environ["SETUP_COMPONENT"]: {
+        "repository": image,
+        "context": ".",
+        "containerfile": containerfile,
+        "validationTargets": os.environ["SETUP_VALIDATION_TARGETS"].split(","),
+        "releaseTarget": None if os.environ["SETUP_RELEASE_TARGET"] == "-" else os.environ["SETUP_RELEASE_TARGET"],
+        "components": [os.environ["SETUP_COMPONENT"]],
+    }
+})
+if registry_mode == "owned":
+    service = os.environ["SETUP_SERVICE"]
+    for build in builds.values():
+        components = build.get("components", [])
+        if not components:
+            raise SystemExit("every build requires at least one component")
+        mappings = {component: f"{registry_host}/{service}/{component}" for component in components}
+        build["repository"] = mappings[components[0]]
+        build["componentRepositories"] = mappings
 project = {
     "apiVersion": "arcturus.u128.org/project/v1",
     "service": os.environ["SETUP_SERVICE"],
@@ -429,21 +516,21 @@ project = {
                        else {"mode": "command"}),
     },
     "registry": {
-        "host": image.split("/", 1)[0],
+        "mode": registry_mode,
+        "host": registry_host,
+        **({"origin": registry_origin} if registry_origin else {}),
         "userSecret": "REGISTRY_USER",
         "tokenSecret": "REGISTRY_TOKEN",
     },
-    "builds": source.get("builds", {
-        os.environ["SETUP_COMPONENT"]: {
-            "repository": image,
-            "context": ".",
-            "containerfile": containerfile,
-            "validationTargets": os.environ["SETUP_VALIDATION_TARGETS"].split(","),
-            "releaseTarget": None if os.environ["SETUP_RELEASE_TARGET"] == "-" else os.environ["SETUP_RELEASE_TARGET"],
-            "components": [os.environ["SETUP_COMPONENT"]],
-        }
-    }),
+    "builds": builds,
     "fixedComponents": source.get("fixedComponents", []),
+    "compatibility": {
+        "manifestApis": (["arcturus.u128.org/v1", "arcturus.u128.org/v2"]
+                         if os.environ["SETUP_COMPAT_V1"] == "true"
+                         else ["arcturus.u128.org/v2"]),
+        "v1Mode": ("routing-mirror" if os.environ["SETUP_COMPAT_V1"] == "true" else "disabled"),
+        "v1Manifest": ".arcturus/compat-v1.json",
+    },
     "verification": source.get("verification", {
         "publicUrl": (
             "https://" + os.environ["SETUP_DOMAIN"]
@@ -460,10 +547,16 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     handle.write("\n")
 PY
 
+  required_features="authenticated-preflight,legacy-compose-handoff"
+  [[ "$REGISTRY_MODE" == owned ]] && required_features+=",oci-upload-grants,artifact-verification-and-receipts,receipt-enforced-owned-registry"
+  [[ "$COMPAT_MANIFEST_V1" == true ]] && required_features+=",manifest-v1-safe-routing-mirror,manifest-v1-provenance-routing"
+  supported_manifest_apis="arcturus.u128.org/v2"
+  [[ "$COMPAT_MANIFEST_V1" == true ]] && supported_manifest_apis="arcturus.u128.org/v1,arcturus.u128.org/v2"
   cat >"$work/.arcturus/lock.env" <<EOF
 ARCTURUS_SCHEMA_VERSION=arcturus.u128.org/v2
-ARCTURUS_MIN_VERSION=0.99.0-rc.2
-ARCTURUS_REQUIRED_FEATURES=authenticated-preflight,legacy-compose-handoff
+ARCTURUS_SUPPORTED_MANIFEST_APIS=$supported_manifest_apis
+ARCTURUS_MIN_VERSION=1.0.0-rc.2
+ARCTURUS_REQUIRED_FEATURES=$required_features
 ARCTURUS_BUNDLE=$BUNDLE
 EOF
   printf '#!/usr/bin/env bash\nset -euo pipefail\n%s\n' "$TEST_COMMAND" >"$work/scripts/arcturus-ci-test"
@@ -501,7 +594,7 @@ case "\$action" in
 esac
 EOF
 
-  for script in arcturus-guard arcturus-tool arcturus-ci arcturus-lifecycle arcturus-acceptance arcturus-host-acceptance; do
+  for script in arcturus-guard arcturus-tool arcturus-ci arcturus-oci-publish arcturus-compat-v1 arcturus-lifecycle arcturus-acceptance arcturus-host-acceptance; do
     install -m 0755 "$BLUEPRINT_ROOT/scripts/$script" "$work/scripts/$script"
   done
 
@@ -509,28 +602,38 @@ EOF
   [[ "$CI_PROVIDER" == github ]] && workflow_dir=".github/workflows"
   if [[ "$CI_PROVIDER" =~ ^(gitea|github)$ ]]; then
     mkdir -p "$work/$workflow_dir"
+    workflow_context="$CI_PROVIDER"
+    concurrency_block=""
+    if [[ "$CI_PROVIDER" == github ]]; then
+      concurrency_block=$'concurrency:\n  group: arcturus-'"$SERVICE"$'\n  cancel-in-progress: false'
+    fi
+    checkout_action="actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" # v4.2.2
+    if [[ "$CI_PROVIDER" == gitea ]]; then
+      # Gitea may resolve unqualified actions against its own instance when
+      # DEFAULT_ACTIONS_URL=self. Use an absolute immutable upstream reference.
+      checkout_action="https://github.com/actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+    fi
+    registry_secret_block=""
+    if [[ "$REGISTRY_MODE" == external ]]; then
+      registry_secret_block=$'          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}\n          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}'
+    fi
     cat >"$work/$workflow_dir/deploy.yaml" <<EOF
 name: Deploy $SERVICE
 on:
   push:
     branches: [main]
-concurrency:
-  group: arcturus-$SERVICE
-  cancel-in-progress: false
-env:
-  ARCTURUS_REGISTRY_HOST: "${IMAGE_REPOSITORY%%/*}"
+$concurrency_block
 jobs:
   deploy:
     name: Build, deploy, and verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: $checkout_action # v4.2.2
       - name: Build, deploy, and verify immutable release
         env:
-          REGISTRY_USER: \${{ secrets.REGISTRY_USER }}
-          REGISTRY_TOKEN: \${{ secrets.REGISTRY_TOKEN }}
           ARCTURUS_DEPLOY_TOKEN: \${{ secrets.ARCTURUS_DEPLOY_TOKEN }}
-        run: ./scripts/arcturus-ci '\${{ github.sha }}'
+$registry_secret_block
+        run: ./scripts/arcturus-ci '\${{ ${workflow_context}.sha }}'
 EOF
     cat >"$work/$workflow_dir/lifecycle.yaml" <<EOF
 name: Manage $SERVICE
@@ -543,46 +646,35 @@ on:
       confirm:
         description: "Type $SERVICE to confirm"
         required: true
-concurrency:
-  group: arcturus-$SERVICE
-  cancel-in-progress: false
-env:
-  ARCTURUS_REGISTRY_HOST: "${IMAGE_REPOSITORY%%/*}"
+$concurrency_block
 jobs:
   lifecycle:
     name: Run lifecycle operation
-    if: \${{ github.event.inputs.confirm == '$SERVICE' }}
+    if: \${{ ${workflow_context}.event.inputs.confirm == '$SERVICE' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: $checkout_action # v4.2.2
       - name: Run lifecycle operation through arcturusctl
         env:
-          REGISTRY_USER: \${{ secrets.REGISTRY_USER }}
-          REGISTRY_TOKEN: \${{ secrets.REGISTRY_TOKEN }}
           ARCTURUS_DEPLOY_TOKEN: \${{ secrets.ARCTURUS_DEPLOY_TOKEN }}
-        run: ./scripts/arcturus-lifecycle '\${{ github.event.inputs.operation }}'
+        run: ./scripts/arcturus-lifecycle '\${{ ${workflow_context}.event.inputs.operation }}'
 EOF
     cat >"$work/$workflow_dir/acceptance.yaml" <<EOF
 name: Test $SERVICE rollback
 on:
   workflow_dispatch:
-concurrency:
-  group: arcturus-$SERVICE
-  cancel-in-progress: false
-env:
-  ARCTURUS_REGISTRY_HOST: "${IMAGE_REPOSITORY%%/*}"
+$concurrency_block
 jobs:
   acceptance:
     name: Prove automatic rollback
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: $checkout_action # v4.2.2
       - name: Build current release and prove automatic rollback
         env:
-          REGISTRY_USER: \${{ secrets.REGISTRY_USER }}
-          REGISTRY_TOKEN: \${{ secrets.REGISTRY_TOKEN }}
           ARCTURUS_DEPLOY_TOKEN: \${{ secrets.ARCTURUS_DEPLOY_TOKEN }}
-        run: ./scripts/arcturus-ci '\${{ github.sha }}' --acceptance
+$registry_secret_block
+        run: ./scripts/arcturus-ci '\${{ ${workflow_context}.sha }}' --acceptance
 EOF
   fi
 
@@ -626,16 +718,17 @@ EOF
     return 0
   }
 
-  generated=(AGENTS.md arcturus.release.json .arcturus/lock.env scripts/arcturus-guard scripts/arcturus-ci-test scripts/arcturus-tool scripts/arcturus-ci scripts/arcturus-lifecycle scripts/arcturus-acceptance scripts/arcturus-host-acceptance scripts/arcturus-release scripts/arcturus-deploy scripts/arcturus-service)
+  generated=(AGENTS.md arcturus.release.json .arcturus/lock.env scripts/arcturus-guard scripts/arcturus-ci-test scripts/arcturus-tool scripts/arcturus-ci scripts/arcturus-oci-publish scripts/arcturus-compat-v1 scripts/arcturus-lifecycle scripts/arcturus-acceptance scripts/arcturus-host-acceptance scripts/arcturus-release scripts/arcturus-deploy scripts/arcturus-service)
+  [[ "$COMPAT_MANIFEST_V1" == true ]] && generated+=(.arcturus/compat-v1.json)
   [[ "$CI_PROVIDER" =~ ^(gitea|github)$ ]] && generated+=("$workflow_dir/deploy.yaml" "$workflow_dir/lifecycle.yaml" "$workflow_dir/acceptance.yaml")
   $LOCAL_COMPOSE && generated+=(compose.yaml)
   for relative in "${generated[@]}"; do install_generated "$relative"; done
   if ! $DRY_RUN; then
     if [[ ! -f "$PROJECT_DIR/.arcturus/project.json" ]]; then
       install -m 0644 "$work/.arcturus/project.json" "$PROJECT_DIR/.arcturus/project.json"
-    elif ! grep -q '"apiVersion": "arcturus.u128.org/project/v1"' "$PROJECT_DIR/.arcturus/project.json"; then
+    elif ! cmp -s "$work/.arcturus/project.json" "$PROJECT_DIR/.arcturus/project.json"; then
       install -m 0644 "$work/.arcturus/project.json" "$PROJECT_DIR/.arcturus/updates/project.json.new"
-      echo "Preserved project-owned .arcturus/project.json; schema update staged at .arcturus/updates/project.json.new" >&2
+      echo "Preserved project-owned .arcturus/project.json; proposed compatibility update staged at .arcturus/updates/project.json.new" >&2
     fi
     chmod 0755 "$PROJECT_DIR/scripts/arcturus-"* "$PROJECT_DIR/scripts/arcturus-tool"
     install -m 0644 "$new_state" "$state_file"
@@ -648,6 +741,9 @@ ARCTURUS_COMPONENT=$COMPONENT
 ARCTURUS_PROJECT_SPEC=$PROJECT_SPEC
 ARCTURUS_SERVICE_TYPE=$SERVICE_TYPE
 ARCTURUS_IMAGE_REPOSITORY=$IMAGE_REPOSITORY
+ARCTURUS_REGISTRY_MODE=$REGISTRY_MODE
+ARCTURUS_REGISTRY_ORIGIN=$REGISTRY_ORIGIN
+ARCTURUS_COMPAT_MANIFEST_V1=$COMPAT_MANIFEST_V1
 ARCTURUS_CONTAINERFILE=$CONTAINERFILE
 ARCTURUS_VALIDATION_TARGETS=$VALIDATION_TARGETS
 ARCTURUS_RELEASE_TARGET=$RELEASE_TARGET
@@ -674,6 +770,7 @@ EOF
 # BEGIN ARCTURUS GENERATED
 .arcturus/build/
 .arcturus/updates/
+.arcturus/compat-v1.json
 image.digest
 release.json
 deployment-request.json

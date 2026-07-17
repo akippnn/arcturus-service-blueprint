@@ -120,7 +120,11 @@ install_updater() {
   current=""; [[ -f "$target" ]] && current="$(sha256_file "$target")"
   managed="$(managed_updater_digest)"
 
-  if [[ ! -e "$target" || "$current" == "$desired" || ( -n "$managed" && "$current" == "$managed" ) ]]; then
+  if [[ -e "$target" && "$current" == "$desired" ]]; then
+    # Avoid replacing an identical updater while that updater is executing.
+    # A newer blueprint still replaces it when the candidate digest changes.
+    :
+  elif [[ ! -e "$target" || ( -n "$managed" && "$current" == "$managed" ) ]]; then
     mkdir -p "$(dirname "$target")"
     install -m 0755 "$source" "$target.new"
     mv -f "$target.new" "$target"

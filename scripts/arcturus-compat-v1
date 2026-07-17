@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  arcturus-compat-v1 render V2_MANIFEST V1_OUTPUT
+  arcturus-compat-v1 check V2_MANIFEST V1_MANIFEST
+
+Manifest v1 is retained only as a routing compatibility mirror. The v2 release
+remains the sole deployment, artifact, health, rollback, and recovery authority.
+USAGE
+}
+
+mode="${1:-}"
+source_manifest="${2:-}"
+target_manifest="${3:-}"
+[[ "$mode" =~ ^(render|check)$ && -n "$source_manifest" && -n "$target_manifest" ]] || {
+  usage >&2
+  exit 2
+}
+
+python3 - "$mode" "$source_manifest" "$target_manifest" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+
+mode, source_name, target_name = sys.argv[1:]
+source_path = Path(source_name)
+target_path = Path(target_name)
+release = json.loads(source_path.read_text(encoding="utf-8"))
+if release.get("apiVersion") != "arcturus.u128.org/v2" or release.get("kind") != "ServiceRelease":
+    raise SystemExit("compatibility source must be a manifest-v2 ServiceRelease")
+metadata = release.get("metadata") or {}
+spec = release.get("spec") or {}
+components = spec.get("components") or {}
+routing = spec.get("routing") or {}
+name = metadata.get("name")
+revision = metadata.get("revision")
+if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", name):
+    raise SystemExit("manifest-v2 service name is invalid")
+if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+    raise SystemExit("manifest-v2 revision is invalid")
+
+services: dict[str, dict] = {}
+for route_name, route in sorted(routing.items()):
+    component_name = route.get("component")
+    component = components.get(component_name)
+    if not isinstance(component, dict):
+        raise SystemExit(f"route {route_name!r} references a missing component")
+    service = {
+        "port": route.get("port"),
+        "protocol": route.get("protocol", "http"),
+        "domains": route.get("domains", []),
+        "aliases": route.get("aliases", []),
+        "type": (
+            "tcp-forward" if route.get("protocol") == "tcp"
+            else "udp-forward" if route.get("protocol") == "udp"
+            else "proxy"
+        ),
+        "websocket": route.get("websocket", False),
+        "maxBodySize": route.get("maxBodySize", "1G"),
+        "containerName": component.get("containerName") or f"arcturus-{name}-{component_name}",
+    }
+    health = component.get("healthCheck")
+    if isinstance(health, dict) and isinstance(health.get("command"), str):
+        service["healthCheck"] = health["command"]
+    services[route_name] = service
+
+annotations = {
+    "arcturus.u128.org/revision": revision,
+    "arcturus.u128.org/compatibility-source": "v2",
+}
+deployment_id = metadata.get("deploymentId")
+if deployment_id:
+    annotations["arcturus.u128.org/deployment-id"] = deployment_id
+
+networks = []
+for network in spec.get("networks", []):
+    if isinstance(network, dict) and isinstance(network.get("name"), str):
+        networks.append(network["name"])
+
+mirror = {
+    "apiVersion": "arcturus.u128.org/v1",
+    "kind": "Stack",
+    "metadata": {
+        "name": name,
+        "namespace": "default",
+        "annotations": annotations,
+    },
+    "spec": {
+        "services": services,
+        "network": {"isolate": False, "external": networks},
+        "deploy": {"managed": True, "strategy": "quadlet", "autoUpdate": False},
+    },
+}
+rendered = json.dumps(mirror, indent=2, sort_keys=True) + "\n"
+
+if mode == "check":
+    existing = json.loads(target_path.read_text(encoding="utf-8"))
+    if existing != mirror:
+        raise SystemExit(
+            f"{target_path} is not the exact safe manifest-v1 mirror of {source_path}; "
+            "run arcturus-compat-v1 render"
+        )
+    print(json.dumps({"status": "valid", "manifestApi": "arcturus.u128.org/v1", "source": "v2"}))
+else:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(dir=target_path.parent, prefix=f".{target_path.name}.")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(rendered)
+    os.chmod(temporary_name, 0o644)
+    os.replace(temporary_name, target_path)
+    print(json.dumps({"status": "rendered", "output": str(target_path)}))
+PY

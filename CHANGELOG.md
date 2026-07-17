@@ -1,21 +1,30 @@
 # Changelog
 
-## [0.99.0-rc.2] - 2026-07-15
+## [1.0.0-rc.2] - 2026-07-18
 
 ### Added
 
-- Replayable project bootstrap and update workflow with blueprint provenance, normalized setup intent, and append-only update history
-- Machine-readable compatibility metadata and generated minimum-host capability locks
-- Authenticated host preflight before expensive application image builds
-- Declarative legacy Compose migration support in project specifications
-- Compatibility and project-update documentation for RC1 adoption and older deployment generations
+- Provider-neutral Gitea, GitHub, and generic CI driver with provider-correct workflow contexts
+- External-registry and Arcturus-owned OCI publishing modes
+- Automatic shared-build to per-component repository publication for receipt isolation
+- Deterministic manifest-v1 routing mirror generated and checked against authoritative manifest v2
+- Incremental adoption guidance for existing native manifest-v1 projects preserved by host-issued runtime provenance
+- Replayable project bootstrap/update provenance and capability locks
 
 ### Changed
 
-- Generated workflows support an explicit registry username while retaining GitHub and Gitea actor fallback
-- Build execution prefers isolated Buildah storage before Podman fallback
-- Setup validation isolates optional cross-repository host-installer testing from normal blueprint validation
-- Generated workflow names and deployment diagnostics are clearer and consistent across GitHub and Gitea
+- Manifest v2 remains the only deployment, activation, rollback, and recovery authority
+- Gitea workflow concurrency is treated as advisory; host-side service locking is authoritative
+- Generated Gitea workflows use an absolute immutable checkout action reference so instance-level action-source settings cannot redirect it
+- Owned mode needs only the service-scoped Arcturus control token as a long-lived publisher secret; tailnet enrollment remains project/runner-owned
+- Project updates stage a proposed `.arcturus/project.json` when compatibility metadata changes
+
+### Security
+
+- Owned uploads use short-lived repository-scoped credentials and immutable Rust-verified receipts
+- V1 compatibility exports carry the exact v2 revision and omit arbitrary nginx configuration; current hosts still derive trusted routing provenance internally
+- Native v1 source files retain project ownership while the trusted host registry strips spoofed provenance and supplies a canonical runtime digest plus content-derived revision that the router revalidates
+- Full Git revisions are injected as OCI labels and verified before receipt acceptance
 
 ## [0.99.0-rc.1] - 2026-07-13
 

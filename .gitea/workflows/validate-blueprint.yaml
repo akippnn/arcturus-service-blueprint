@@ -8,7 +8,9 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: https://github.com/actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify version metadata
+        run: ./tests/check-version-consistency.py
       - name: Test idempotent bootstrap
         run: ./tests/test-setup.sh
       - name: Test replayable updates
@@ -18,9 +20,11 @@ jobs:
       - name: Validate shell entrypoints
         run: |
           bash -n scripts/arcturus-setup scripts/arcturus-update scripts/arcturus-tool scripts/arcturus-ci \
+            scripts/arcturus-oci-publish scripts/arcturus-compat-v1 \
             scripts/arcturus-lifecycle scripts/arcturus-acceptance scripts/arcturus-host-acceptance \
             scripts/arcturus-release scripts/arcturus-deploy \
-            scripts/arcturus-service scripts/arcturus-guard examples/ci/generic.sh tests/test-update.sh
+            scripts/arcturus-service scripts/arcturus-guard examples/ci/generic.sh \
+            tests/test-setup.sh tests/test-update.sh
       - name: Validate example JSON
         run: |
           python3 -m json.tool arcturus.release.json >/dev/null

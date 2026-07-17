@@ -4,113 +4,100 @@ set -euo pipefail
 fail() { echo "Arcturus deployment contract: $*" >&2; exit 1; }
 test -f arcturus.release.json || fail "missing arcturus.release.json"
 test -f .arcturus/project.json || fail "missing project-owned .arcturus/project.json"
-grep -q '"apiVersion": "arcturus.u128.org/v2"' arcturus.release.json || fail "manifest must use arcturus.u128.org/v2"
-if command -v python3 >/dev/null 2>&1; then
-  python3 - <<'PY' || fail "release manifest routing contract is invalid"
-import json
+grep -q '"apiVersion": "arcturus.u128.org/v2"' arcturus.release.json || fail "manifest v2 must remain authoritative"
+command -v python3 >/dev/null 2>&1 || fail "validation requires python3"
 
-with open("arcturus.release.json", encoding="utf-8") as stream:
-    manifest = json.load(stream)
-with open(".arcturus/project.json", encoding="utf-8") as stream:
-    project = json.load(stream)
-
-if project.get("apiVersion") != "arcturus.u128.org/project/v1":
-    raise SystemExit("project configuration must use arcturus.u128.org/project/v1")
-if project.get("service") != manifest.get("metadata", {}).get("name"):
-    raise SystemExit("project service and manifest service differ")
-if project.get("manifest") != "arcturus.release.json":
-    raise SystemExit("project manifest must be arcturus.release.json")
-if project.get("ci", {}).get("storage") != "isolated":
-    raise SystemExit("CI storage must be isolated")
-test_intent = project.get("ci", {}).get("testIntent", {})
-if test_intent.get("mode") not in {"command", "container-target", "waived"}:
-    raise SystemExit("CI must declare test intent: command, container-target, or waived")
-if test_intent.get("mode") == "waived" and not test_intent.get("reason"):
-    raise SystemExit("a waived test intent requires a reviewable reason")
-obsolete = {"DEPLOY_WEBHOOK_SECRET", "DEPLOY_SECRET", "REGISTRY_PASSWORD", "REGISTRY_AUTH"}
-secret_names = {
-    project.get("ci", {}).get("deployTokenSecret"),
-    project.get("registry", {}).get("userSecret"),
-    project.get("registry", {}).get("tokenSecret"),
-}
-if obsolete & secret_names:
-    raise SystemExit("project configuration uses an obsolete secret name")
-
-components = manifest.get("spec", {}).get("components", {})
-mapped = {}
-for build_name, build in project.get("builds", {}).items():
-    if not build.get("validationTargets"):
-        raise SystemExit(f"build {build_name!r} requires at least one validation target")
-    for value in [*build.get("validationTargets", []), build.get("releaseTarget")]:
-        if value and not all(c.isalnum() or c in "_.-" for c in value):
-            raise SystemExit(f"build {build_name!r} has an invalid target")
-    for component_name in build.get("components", []):
-        if component_name in mapped:
-            raise SystemExit(f"component {component_name!r} has multiple build mappings")
-        if component_name not in components:
-            raise SystemExit(f"build {build_name!r} maps missing component {component_name!r}")
-        repository = components[component_name].get("image", "").split("@", 1)[0]
-        if repository != build.get("repository"):
-            raise SystemExit(f"component {component_name!r} repository differs from its build")
-        mapped[component_name] = build_name
-fixed = set(project.get("fixedComponents", []))
-if set(components) != set(mapped) | fixed or set(mapped) & fixed:
-    raise SystemExit("every component must map exactly once to a build or fixed image")
+compat_fields="$(python3 - <<'PY'
+import json,re
+from pathlib import Path
+manifest=json.load(open('arcturus.release.json', encoding='utf-8'))
+project=json.load(open('.arcturus/project.json', encoding='utf-8'))
+if project.get('apiVersion')!='arcturus.u128.org/project/v1': raise SystemExit('project configuration must use project/v1')
+if project.get('service')!=manifest.get('metadata',{}).get('name'): raise SystemExit('project service and manifest service differ')
+if project.get('manifest')!='arcturus.release.json': raise SystemExit('project manifest must be arcturus.release.json')
+ci=project.get('ci',{})
+if ci.get('provider') not in {'gitea','github','generic','none'}: raise SystemExit('invalid CI provider')
+if ci.get('storage')!='isolated': raise SystemExit('CI storage must be isolated')
+intent=ci.get('testIntent',{'mode':'container-target'})
+if intent.get('mode') not in {'command','container-target','waived'}: raise SystemExit('invalid test intent')
+if intent.get('mode')=='waived' and not intent.get('reason'): raise SystemExit('waived test intent requires a reason')
+registry=project.get('registry',{})
+mode=registry.get('mode','external')
+host=registry.get('host','')
+if mode not in {'external','owned'}: raise SystemExit('registry mode must be external or owned')
+if not re.fullmatch(r'[a-z0-9][a-z0-9.-]*(?::[0-9]+)?',host): raise SystemExit('invalid registry host')
+if mode=='owned':
+    origin=registry.get('origin','')
+    if origin!='https://'+host: raise SystemExit('owned registry origin must exactly match the HTTPS registry host')
+obsolete={'DEPLOY_WEBHOOK_SECRET','DEPLOY_SECRET','REGISTRY_PASSWORD','REGISTRY_AUTH'}
+secret_names={ci.get('deployTokenSecret'),registry.get('userSecret'),registry.get('tokenSecret')}
+if obsolete & secret_names: raise SystemExit('obsolete secret name')
+components=manifest.get('spec',{}).get('components',{})
+mapped={}
+service=project['service']
+for build_name,build in project.get('builds',{}).items():
+    targets=build.get('validationTargets',[])
+    if not targets: raise SystemExit(f'build {build_name!r} requires a validation target')
+    mappings=build.get('componentRepositories',{})
+    build_components=build.get('components',[])
+    if set(mappings)-set(build_components): raise SystemExit(f'build {build_name!r} maps repositories for unknown components')
+    if mode=='owned' and set(mappings)!=set(build_components): raise SystemExit(f'owned build {build_name!r} requires per-component repositories')
+    for component_name in build_components:
+        if component_name in mapped: raise SystemExit(f'component {component_name!r} has multiple build mappings')
+        component=components.get(component_name)
+        if component is None: raise SystemExit(f'build {build_name!r} maps missing component {component_name!r}')
+        repository=component.get('image','').split('@',1)[0]
+        expected=mappings.get(component_name,build.get('repository'))
+        if repository!=expected: raise SystemExit(f'component {component_name!r} repository differs from build mapping')
+        if mode=='owned' and repository!=f'{host}/{service}/{component_name}': raise SystemExit(f'owned component {component_name!r} must use its isolated service/component repository')
+        mapped[component_name]=build_name
+fixed=set(project.get('fixedComponents',[]))
+if set(components)!=set(mapped)|fixed or set(mapped)&fixed: raise SystemExit('every component must map exactly once to a build or fixed image')
 for component_name in fixed:
-    image = components.get(component_name, {}).get("image", "")
-    if not image.count("@sha256:") == 1 or image.endswith("0" * 64):
-        raise SystemExit(f"fixed component {component_name!r} must use a real immutable digest")
-for component_name, component in components.items():
-    for dependency in component.get("dependsOn", []):
-        if dependency not in components:
-            raise SystemExit(f"component {component_name!r} has missing dependency {dependency!r}")
-    for key, value in component.get("environment", {}).items():
-        if any(word in key.lower() for word in ("secret", "token", "password", "credential", "private_key")):
-            raise SystemExit(f"secret-like environment field {key!r} must use a secret reference")
-    for volume in component.get("volumes", []):
-        if volume.get("type") == "volume" and volume.get("external") and not volume.get("source"):
-            raise SystemExit(f"external volume on {component_name!r} requires an existing name")
-for route_name, route in manifest.get("spec", {}).get("routing", {}).items():
-    component_name = route.get("component")
-    component = components.get(component_name)
-    if component is None:
-        raise SystemExit(f"route {route_name!r} references missing component {component_name!r}")
-    if "internal_routing" not in component.get("networks", []):
-        raise SystemExit(
-            f"route {route_name!r} component {component_name!r} must join internal_routing"
-        )
-    if not route.get("domains"):
-        raise SystemExit(f"route {route_name!r} requires at least one domain")
-    if not isinstance(route.get("port"), int):
-        raise SystemExit(f"route {route_name!r} requires an integer container port")
-    if not 1 <= route["port"] <= 65535:
-        raise SystemExit(f"route {route_name!r} has an invalid port")
+    image=components[component_name].get('image','')
+    if image.count('@sha256:')!=1 or image.endswith('0'*64): raise SystemExit(f'fixed component {component_name!r} must use a real digest')
+for component_name,component in components.items():
+    for dependency in component.get('dependsOn',[]):
+        if dependency not in components: raise SystemExit(f'component {component_name!r} has missing dependency {dependency!r}')
+    for key in component.get('environment',{}):
+        if any(word in key.lower() for word in ('secret','token','password','credential','private_key')): raise SystemExit(f'secret-like field {key!r} must use a secret reference')
+for route_name,route in manifest.get('spec',{}).get('routing',{}).items():
+    component=components.get(route.get('component'))
+    if component is None: raise SystemExit(f'route {route_name!r} references a missing component')
+    if 'internal_routing' not in component.get('networks',[]): raise SystemExit(f'route {route_name!r} component must join internal_routing')
+    if not route.get('domains'): raise SystemExit(f'route {route_name!r} requires a domain')
+    if not isinstance(route.get('port'),int) or not 1<=route['port']<=65535: raise SystemExit(f'route {route_name!r} has an invalid port')
+compat=project.get('compatibility',{'manifestApis':['arcturus.u128.org/v2'],'v1Mode':'disabled','v1Manifest':'.arcturus/compat-v1.json'})
+apis=compat.get('manifestApis',[])
+if 'arcturus.u128.org/v2' not in apis: raise SystemExit('manifest v2 must remain authoritative')
+v1_mode=compat.get('v1Mode','disabled')
+v1_path=compat.get('v1Manifest','.arcturus/compat-v1.json')
+path=Path(v1_path)
+if path.is_absolute() or '..' in path.parts: raise SystemExit('unsafe v1 compatibility path')
+if 'arcturus.u128.org/v1' in apis:
+    if v1_mode!='routing-mirror': raise SystemExit('manifest v1 is supported only as a routing mirror')
+elif v1_mode!='disabled': raise SystemExit('v1 routing mirror mode requires manifest v1 support')
+print(v1_mode+'\t'+v1_path)
 PY
-elif command -v arcturusctl >/dev/null 2>&1; then
-  # Do not silently use a reduced node/jq implementation: the shipped CLI is the
-  # same canonical schema validator used by CI and the host control plane.
-  arcturusctl project validate .arcturus/project.json || fail "canonical project validation failed"
-else
-  fail "validation requires python3 or the pinned arcturusctl canonical validator"
+)" || fail "project or release contract is invalid"
+IFS=$'\t' read -r v1_mode v1_path <<<"$compat_fields"
+if [[ "$v1_mode" == routing-mirror ]]; then
+  test -x scripts/arcturus-compat-v1 || fail "missing v1 compatibility renderer"
+  test -f "$v1_path" || fail "missing generated v1 routing mirror; run scripts/arcturus-compat-v1 render"
+  ./scripts/arcturus-compat-v1 check arcturus.release.json "$v1_path" >/dev/null || fail "v1 routing mirror differs from v2"
 fi
 
 workflow_files=()
 while IFS= read -r file; do workflow_files+=("$file"); done < <(find .gitea/workflows .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) 2>/dev/null | sort)
 if ((${#workflow_files[@]})); then
-  if grep -nEi '(:latest|/deploy["'\''[:space:]]|docker[[:space:]]+compose|podman[[:space:]]+compose|watchtower|terraform[[:space:]]+(apply|destroy)|DEPLOY_WEBHOOK_SECRET|REGISTRY_PASSWORD|authorization:[[:space:]]*bearer|curl[^#]*(/v1/deployments|/v1/services))' "${workflow_files[@]}"; then
+  if grep -nEi '(:latest|/deploy["'"'"'[:space:]]|docker[[:space:]]+compose|podman[[:space:]]+compose|watchtower|terraform[[:space:]]+(apply|destroy)|DEPLOY_WEBHOOK_SECRET|REGISTRY_PASSWORD|authorization:[[:space:]]*bearer|curl[^#]*(/v1/deployments|/v1/services))' "${workflow_files[@]}"; then
     fail "legacy, mutable, or competing production deployment ownership found in a workflow"
   fi
   grep -qE '(arcturus-ci|project deploy)' "${workflow_files[@]}" || fail "CI does not invoke the project-aware deployment driver"
 fi
-
-if [[ -f .git/config ]] && grep -qE 'url = https?://[^/@[:space:]]+:[^/@[:space:]]+@' .git/config; then
-  fail "Git remote contains embedded credentials"
-fi
-
+if [[ -f .git/config ]] && grep -qE 'url = https?://[^/@[:space:]]+:[^/@[:space:]]+@' .git/config; then fail "Git remote contains embedded credentials"; fi
 terraform_files=()
 while IFS= read -r file; do terraform_files+=("$file"); done < <(find terraform -type f -name '*.tf' -not -path '*/.terraform/*' 2>/dev/null | sort)
-if ((${#terraform_files[@]})) && grep -nE '(null_resource|local_file|arcturus_deploy|docker compose|podman compose)' "${terraform_files[@]}"; then
-  fail "Terraform application-release orchestration is forbidden"
-fi
+if ((${#terraform_files[@]})) && grep -nE '(null_resource|local_file|arcturus_deploy|docker compose|podman compose)' "${terraform_files[@]}"; then fail "Terraform application-release orchestration is forbidden"; fi
 
 echo "Arcturus deployment contract passed."

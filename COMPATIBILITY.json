@@ -1,16 +1,37 @@
 {
-  "schemaVersion": 1,
-  "product": "arcturus-service-blueprint",
-  "blueprintVersion": "0.99.0-rc.2",
-  "manifestApi": "arcturus.u128.org/v2",
-  "projectApi": "arcturus.u128.org/project/v1",
-  "minimumArcturusVersion": "0.99.0-rc.2",
-  "requiredFeatures": [
-    "authenticated-preflight",
-    "legacy-compose-handoff"
-  ],
-  "adoption": {
-    "automaticFrom": "0.99.0-rc.1 project-aware generation",
-    "legacyProjects": "one-time explicit bootstrap required"
-  }
+    "schemaVersion": 1,
+    "product": "arcturus-service-blueprint",
+    "blueprintVersion": "1.0.0-rc.2",
+    "projectApi": "arcturus.u128.org/project/v1",
+    "minimumArcturusVersion": "1.0.0-rc.2",
+    "requiredFeatures": [
+        "authenticated-preflight",
+        "legacy-compose-handoff",
+        "manifest-v1-safe-routing-mirror",
+        "manifest-v1-provenance-routing"
+    ],
+    "adoption": {
+        "automaticFrom": "0.99.0-rc.1 project-aware generation",
+        "legacyProjects": "one-time explicit bootstrap required"
+    },
+    "manifestApis": [
+        "arcturus.u128.org/v1",
+        "arcturus.u128.org/v2"
+    ],
+    "manifestV1Mode": "v2-backed-routing-mirror",
+    "ciProviders": [
+        "gitea",
+        "github",
+        "generic",
+        "none"
+    ],
+    "registryModes": [
+        "external",
+        "owned"
+    ],
+    "optionalFeatures": [
+        "oci-upload-grants",
+        "artifact-verification-and-receipts",
+        "receipt-enforced-owned-registry"
+    ]
 }

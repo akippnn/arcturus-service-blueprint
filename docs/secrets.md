@@ -69,7 +69,7 @@ For database credentials, create a least-privileged runtime role and a versioned
 
 ## CI secrets
 
-Store `ARCTURUS_DEPLOY_TOKEN`, `REGISTRY_USER`, and `REGISTRY_TOKEN` in protected repository or organization secret storage. Restrict deployment workflows to protected branches and trusted runners. Do not enable shell tracing, interpolate secrets into command arguments, append them to tracked or artifacted `.env` files, or upload response/debug bundles containing environment dumps.
+In external-registry mode, store `ARCTURUS_DEPLOY_TOKEN`, `REGISTRY_USER`, and `REGISTRY_TOKEN` in protected repository or organization secret storage. In owned-registry mode, store only `ARCTURUS_DEPLOY_TOKEN` for Arcturus publishing; the registry username/password is issued per upload and expires shortly afterward. Tailnet enrollment credentials remain project/runner-owned and must not be generated into repository files. Restrict deployment workflows to protected branches and trusted runners. Do not enable shell tracing, interpolate secrets into command arguments, append them to tracked or artifacted `.env` files, or upload response/debug bundles containing environment dumps.
 
 Masking is defense in depth, not permission to print values. The generated workflow passes registry tokens through stdin, converts the deployment token to a protected file, and runs the digest-pinned CLI from isolated Buildah storage. Arcturus redacts authorization, token, password, secret, API-key, and registry-auth fields from structured output.
 
